@@ -1,30 +1,27 @@
-import asyncio
 import os
-from dotenv import load_dotenv
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from google import genai
 from pydantic import BaseModel
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 load_dotenv()
 
-app = FastAPI()
-
-# Enable CORS for Flutter Web
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+# Initialize Gemini Client
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-chat = client.chats.create(model="gemini-3.8-flash")
+
+app = FastAPI(title="ChatGPT Clone Backend")
+
+
+class ChatMessage(BaseModel):
+    role: str  # "user" or "model"
+    content: str
 
 
 class ChatRequest(BaseModel):
     message: str
+    history: Optional[List[ChatMessage]] = []
 
 
 @app.get("/")
@@ -33,17 +30,34 @@ def root():
 
 
 @app.post("/chat")
-async def chat_endpoint(request: ChatRequest):
-    if not request.message.strip():
-        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+def chat(request: ChatRequest):
+    try:
+        # Build contents array containing chat history + new message
+        contents = []
 
-    # Retry up to 3 times if Google's servers return a 503 error
-    for attempt in range(3):
-        try:
-            response = chat.send_message(request.message)
-            return {"reply": response.text}
-        except Exception as e:
-            if ("503" in str(e) or "UNAVAILABLE" in str(e)) and attempt < 2:
-                await asyncio.sleep(1)
-                continue
-            raise HTTPException(status_code=500, detail=str(e))
+        for msg in request.history:
+            contents.append(
+                types.Content(
+                    role=msg.role,
+                    parts=[types.Part.from_text(text=msg.content)]
+                )
+            )
+
+        # Append latest message
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=request.message)]
+            )
+        )
+
+        # Send full chat history context to Gemini
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=contents
+        )
+
+        return {"response": response.text}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
