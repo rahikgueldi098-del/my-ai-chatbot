@@ -38,7 +38,15 @@ HTML_CONTENT = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-        body { background-color: #212121; color: #ececec; display: flex; flex-direction: column; height: 100vh; }
+        body { background-color: #212121; color: #ececec; display: flex; height: 100vh; overflow: hidden; }
+
+        /* Sidebar Layout */
+        #sidebar { width: 260px; background-color: #171717; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 15px; }
+        #new-chat-btn { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 8px; padding: 10px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s; }
+        #new-chat-btn:hover { background: #383838; }
+
+        /* Main Chat Area */
+        #main-container { flex: 1; display: flex; flex-direction: column; height: 100vh; }
         header { padding: 15px 20px; border-bottom: 1px solid #333; text-align: center; font-weight: 600; font-size: 1.1rem; background: #171717; }
         #chat-box { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 800px; width: 100%; margin: 0 auto; }
         .message { display: flex; flex-direction: column; gap: 6px; max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.95rem; line-height: 1.6; }
@@ -67,15 +75,30 @@ HTML_CONTENT = """
     </style>
 </head>
 <body>
-    <header>AI Assistant</header>
-    <div id="chat-box"></div>
-    <div id="input-container">
-        <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter for new line)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
-        <button id="send-btn" onclick="sendMessage()">Send</button>
+    <div id="sidebar">
+        <button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+    </div>
+
+    <div id="main-container">
+        <header>AI Assistant</header>
+        <div id="chat-box"></div>
+        <div id="input-container">
+            <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter for new line)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
+            <button id="send-btn" onclick="sendMessage()">Send</button>
+        </div>
     </div>
 
     <script>
         let conversationHistory = [];
+
+        function startNewChat() {
+            conversationHistory = [];
+            document.getElementById("chat-box").innerHTML = "";
+            const inputEl = document.getElementById("user-input");
+            inputEl.value = "";
+            inputEl.style.height = "48px";
+            inputEl.focus();
+        }
 
         function autoExpand(field) {
             field.style.height = 'inherit';
@@ -206,12 +229,25 @@ def chat(request: ChatRequest):
             )
         )
 
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=contents
-        )
+        # Automatic model fallback list
+        models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
 
-        return {"response": response.text}
+        for model_name in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents
+                )
+                return {"response": response.text}
+            except Exception as model_err:
+                # If unavailable (503) or not found, try the next fallback model
+                err_str = str(model_err)
+                if "503" in err_str or "UNAVAILABLE" in err_str or "NOT_FOUND" in err_str:
+                    continue
+                raise model_err
+
+        raise HTTPException(status_code=503,
+                            detail="All model endpoints are currently busy. Please try again in a moment.")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
