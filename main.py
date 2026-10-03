@@ -15,7 +15,7 @@ app = FastAPI(title="ChatGPT Clone")
 
 
 class ChatMessage(BaseModel):
-    role: str  # "user" or "model"
+    role: str
     content: str
 
 
@@ -24,7 +24,7 @@ class ChatRequest(BaseModel):
     history: Optional[List[ChatMessage]] = []
 
 
-# HTML/CSS/JS Frontend
+
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html lang="en">
@@ -139,7 +139,7 @@ def chat(request: ChatRequest):
         )
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=contents
         )
 
