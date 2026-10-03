@@ -240,14 +240,14 @@ def chat(request: ChatRequest):
                 )
                 return {"response": response.text}
             except Exception as model_err:
-                # If unavailable (503) or not found, try the next fallback model
                 err_str = str(model_err)
-                if "503" in err_str or "UNAVAILABLE" in err_str or "NOT_FOUND" in err_str:
+                # Catch 503 (Server Busy), 429 (Quota Exceeded), and NOT_FOUND
+                if any(code in err_str for code in ["503", "429", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "NOT_FOUND"]):
                     continue
                 raise model_err
 
-        raise HTTPException(status_code=503,
-                            detail="All model endpoints are currently busy. Please try again in a moment.")
+        raise HTTPException(status_code=429,
+                            detail="All free tier model quotas have been reached for today. Please try again later.")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
