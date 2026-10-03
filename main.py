@@ -32,10 +32,10 @@ HTML_CONTENT = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Assistant</title>
     <!-- Marked for Markdown parsing -->
-    <script src="[https://cdn.jsdelivr.net/npm/marked/marked.min.js](https://cdn.jsdelivr.net/npm/marked/marked.min.js)"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- Highlight.js for Code Syntax Highlighting -->
-    <link rel="stylesheet" href="[https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css](https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css)">
-    <script src="[https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js](https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js)"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         body { background-color: #212121; color: #ececec; display: flex; flex-direction: column; height: 100vh; }
@@ -93,14 +93,17 @@ HTML_CONTENT = """
 
                 const data = await response.json();
 
+                if (!response.ok) {
+                    botMessageEl.innerText = "Error: " + (data.detail || "Server returned an error");
+                    return;
+                }
+
                 if (data.response) {
                     botMessageEl.innerHTML = marked.parse(data.response);
                     hljs.highlightAll();
 
                     conversationHistory.push({ role: "user", content: text });
                     conversationHistory.push({ role: "model", content: data.response });
-                } else {
-                    botMessageEl.innerText = "Error: " + (data.detail || "Something went wrong.");
                 }
             } catch (err) {
                 botMessageEl.innerText = "Error connecting to server.";
@@ -157,7 +160,7 @@ def chat(request: ChatRequest):
         )
 
         response = client.models.generate_content(
-            model="gemini-3.8-flash",
+            model="gemini-1.5-flash",
             contents=contents
         )
 
