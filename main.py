@@ -32,6 +32,7 @@ class ChatRequest(BaseModel):
     system_instruction: Optional[str] = "You are a helpful, smart, and precise AI assistant."
     file: Optional[FileData] = None
     history: Optional[List[ChatMessage]] = []
+    enable_search: Optional[bool] = True
 
 
 HTML_CONTENT = """
@@ -68,7 +69,10 @@ HTML_CONTENT = """
         /* Main Chat Area */
         #main-container { flex: 1; display: flex; flex-direction: column; height: 100vh; }
         header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: #171717; font-weight: 600; }
+        .header-controls { display: flex; gap: 12px; align-items: center; }
         #persona-select { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 6px; padding: 6px 12px; font-size: 0.88rem; outline: none; cursor: pointer; }
+        .toggle-btn { background: #2f2f2f; color: #888; border: 1px solid #424242; border-radius: 6px; padding: 6px 12px; font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: 0.2s; }
+        .toggle-btn.active { background: #1b3a2b; color: #4ade80; border-color: #22c55e; }
 
         #chat-box { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 800px; width: 100%; margin: 0 auto; }
         .message { display: flex; flex-direction: column; gap: 6px; max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.95rem; line-height: 1.6; }
@@ -112,12 +116,15 @@ HTML_CONTENT = """
     <div id="main-container">
         <header>
             <span>AI Assistant</span>
-            <select id="persona-select">
-                <option value="You are a helpful, smart, and precise AI assistant.">🤖 Default Assistant</option>
-                <option value="You are a Senior Full-Stack Software Engineer. Provide clean, efficient code and explain tech concepts concisely.">💻 Senior Engineer</option>
-                <option value="You are a strict, ultra-concise assistant. Answer using minimal words and direct bullet points only. No fluff.">⚡ Ultra-Concise Mode</option>
-                <option value="You are a creative writer and storytelling assistant with a rich, expressive vocabulary.">✍️ Creative Writer</option>
-            </select>
+            <div class="header-controls">
+                <button id="search-toggle" class="toggle-btn active" onclick="toggleSearch()">🌐 Web Search: ON</button>
+                <select id="persona-select">
+                    <option value="You are a helpful, smart, and precise AI assistant.">🤖 Default Assistant</option>
+                    <option value="You are a Senior Full-Stack Software Engineer. Provide clean, efficient code and explain tech concepts concisely.">💻 Senior Engineer</option>
+                    <option value="You are a strict, ultra-concise assistant. Answer using minimal words and direct bullet points only. No fluff.">⚡ Ultra-Concise Mode</option>
+                    <option value="You are a creative writer and storytelling assistant with a rich, expressive vocabulary.">✍️ Creative Writer</option>
+                </select>
+            </div>
         </header>
         <div id="chat-box"></div>
         <div id="input-wrapper">
@@ -139,6 +146,7 @@ HTML_CONTENT = """
         let currentChatId = null;
         let chats = JSON.parse(localStorage.getItem('ai_chats') || '{}');
         let currentFile = null;
+        let webSearchEnabled = true;
 
         window.onload = () => {
             renderSidebar();
@@ -149,6 +157,18 @@ HTML_CONTENT = """
                 startNewChat();
             }
         };
+
+        function toggleSearch() {
+            webSearchEnabled = !webSearchEnabled;
+            const btn = document.getElementById('search-toggle');
+            if (webSearchEnabled) {
+                btn.classList.add('active');
+                btn.innerText = '🌐 Web Search: ON';
+            } else {
+                btn.classList.remove('active');
+                btn.innerText = '🌐 Web Search: OFF';
+            }
+        }
 
         function saveChats() {
             localStorage.setItem('ai_chats', JSON.stringify(chats));
@@ -194,7 +214,7 @@ HTML_CONTENT = """
 
                 const delBtn = document.createElement("button");
                 delBtn.className = "delete-btn";
-                delBtn.innerHTML = "🗑️";
+                delBtn.innerHTML = "🗑️️";
                 delBtn.title = "Supprimer la discussion";
                 delBtn.onclick = (e) => deleteChat(id, e);
 
@@ -300,7 +320,8 @@ HTML_CONTENT = """
                         message: text, 
                         system_instruction: personaEl.value,
                         file: activeFile, 
-                        history: currentHistory 
+                        history: currentHistory,
+                        enable_search: webSearchEnabled
                     })
                 });
 
@@ -428,8 +449,11 @@ def chat(request: ChatRequest):
 
     contents.append(types.Content(role="user", parts=current_parts))
 
+    tools = [{"google_search": {}}] if request.enable_search else []
+
     config = types.GenerateContentConfig(
-        system_instruction=request.system_instruction
+        system_instruction=request.system_instruction,
+        tools=tools
     )
 
     models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash"]
