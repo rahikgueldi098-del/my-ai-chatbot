@@ -27,7 +27,7 @@ class ChatRequest(BaseModel):
 
 HTML_CONTENT = """
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -42,9 +42,14 @@ HTML_CONTENT = """
         body { background-color: #212121; color: #ececec; display: flex; height: 100vh; overflow: hidden; }
 
         /* Sidebar Layout */
-        #sidebar { width: 260px; background-color: #171717; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 15px; }
+        #sidebar { width: 260px; background-color: #171717; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 15px; gap: 15px; }
         #new-chat-btn { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 8px; padding: 10px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s; }
         #new-chat-btn:hover { background: #383838; }
+
+        #history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+        .history-item { padding: 10px 12px; border-radius: 6px; font-size: 0.88rem; color: #b4b4b4; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: 0.2s; display: flex; justify-content: space-between; align-items: center; }
+        .history-item:hover { background: #2f2f2f; color: #fff; }
+        .history-item.active { background: #212121; color: #fff; font-weight: 500; }
 
         /* Main Chat Area */
         #main-container { flex: 1; display: flex; flex-direction: column; height: 100vh; }
@@ -78,27 +83,69 @@ HTML_CONTENT = """
 <body>
     <div id="sidebar">
         <button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+        <div id="history-list"></div>
     </div>
 
     <div id="main-container">
         <header>AI Assistant</header>
         <div id="chat-box"></div>
         <div id="input-container">
-            <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter for new line)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
+            <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter pour ligne suivante)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
             <button id="send-btn" onclick="sendMessage()">Send</button>
         </div>
     </div>
 
     <script>
-        let conversationHistory = [];
+        let currentChatId = null;
+        let chats = JSON.parse(localStorage.getItem('ai_chats') || '{}');
+
+        window.onload = () => {
+            renderSidebar();
+            const keys = Object.keys(chats);
+            if (keys.length > 0) {
+                loadChat(keys[0]);
+            } else {
+                startNewChat();
+            }
+        };
+
+        function saveChats() {
+            localStorage.setItem('ai_chats', JSON.stringify(chats));
+        }
 
         function startNewChat() {
-            conversationHistory = [];
-            document.getElementById("chat-box").innerHTML = "";
-            const inputEl = document.getElementById("user-input");
-            inputEl.value = "";
-            inputEl.style.height = "48px";
-            inputEl.focus();
+            currentChatId = Date.now().toString();
+            chats[currentChatId] = { title: "Nouvelle discussion", history: [] };
+            saveChats();
+            renderSidebar();
+            loadChat(currentChatId);
+        }
+
+        function renderSidebar() {
+            const listEl = document.getElementById("history-list");
+            listEl.innerHTML = "";
+            const keys = Object.keys(chats).sort((a, b) => b - a);
+
+            keys.forEach(id => {
+                const item = document.createElement("div");
+                item.className = `history-item ${id === currentChatId ? 'active' : ''}`;
+                item.innerText = chats[id].title || "Discussion";
+                item.onclick = () => loadChat(id);
+                listEl.appendChild(item);
+            });
+        }
+
+        function loadChat(id) {
+            currentChatId = id;
+            renderSidebar();
+            const chatBox = document.getElementById("chat-box");
+            chatBox.innerHTML = "";
+
+            const history = chats[id]?.history || [];
+            history.forEach(msg => {
+                appendMessage(msg.role, msg.content, false);
+            });
+            hljs.highlightAll();
         }
 
         function autoExpand(field) {
@@ -125,24 +172,35 @@ HTML_CONTENT = """
             const text = inputEl.value.trim();
             if (!text) return;
 
-            appendMessage("user", text);
+            if (!currentChatId || !chats[currentChatId]) {
+                startNewChat();
+            }
+
+            const currentHistory = chats[currentChatId].history;
+
+            if (currentHistory.length === 0) {
+                chats[currentChatId].title = text.length > 25 ? text.substring(0, 25) + "..." : text;
+                renderSidebar();
+            }
+
+            appendMessage("user", text, true);
             inputEl.value = "";
             inputEl.style.height = "48px";
             inputEl.disabled = true;
             btnEl.disabled = true;
 
-            const botMessageEl = appendMessage("model", "");
+            const botMessageEl = appendMessage("model", "", false);
             let accumulatedText = "";
 
             try {
                 const response = await fetch("/chat", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ message: text, history: conversationHistory })
+                    body: JSON.stringify({ message: text, history: currentHistory })
                 });
 
                 if (!response.ok) {
-                    botMessageEl.innerText = "Error communicating with server.";
+                    botMessageEl.innerText = "Erreur de communication avec le serveur.";
                     return;
                 }
 
@@ -163,11 +221,12 @@ HTML_CONTENT = """
                 hljs.highlightAll();
                 addCopyButtons(botMessageEl);
 
-                conversationHistory.push({ role: "user", content: text });
-                conversationHistory.push({ role: "model", content: accumulatedText });
+                currentHistory.push({ role: "user", content: text });
+                currentHistory.push({ role: "model", content: accumulatedText });
+                saveChats();
 
             } catch (err) {
-                botMessageEl.innerText = "Error connecting to server.";
+                botMessageEl.innerText = "Erreur de connexion au serveur.";
             } finally {
                 inputEl.disabled = false;
                 btnEl.disabled = false;
@@ -178,6 +237,7 @@ HTML_CONTENT = """
         function addCopyButtons(container) {
             const preBlocks = container.querySelectorAll("pre");
             preBlocks.forEach((pre) => {
+                if (pre.parentNode.classList.contains("code-container")) return;
                 const wrapper = document.createElement("div");
                 wrapper.className = "code-container";
                 pre.parentNode.insertBefore(wrapper, pre);
@@ -196,7 +256,7 @@ HTML_CONTENT = """
             });
         }
 
-        function appendMessage(role, text) {
+        function appendMessage(role, text, isUserInput = false) {
             const chatBox = document.getElementById("chat-box");
             const msgDiv = document.createElement("div");
             msgDiv.className = `message ${role}`;
@@ -209,6 +269,7 @@ HTML_CONTENT = """
 
             chatBox.appendChild(msgDiv);
             chatBox.scrollTop = chatBox.scrollHeight;
+            if (role === "model" && text) addCopyButtons(msgDiv);
             return msgDiv;
         }
     </script>
@@ -246,7 +307,6 @@ def chat(request: ChatRequest):
         )
     )
 
-    # Modèles actifs selon la réponse officielle de l'API Google
     models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash"]
 
     def generate_stream():
@@ -260,7 +320,7 @@ def chat(request: ChatRequest):
                 for chunk in response_stream:
                     if chunk.text:
                         yield chunk.text
-                return  # Succès du streaming !
+                return
             except Exception as model_err:
                 last_error = str(model_err)
                 continue
