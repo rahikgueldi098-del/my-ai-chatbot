@@ -211,7 +211,6 @@ HTML_CONTENT = """
             recognition = new SpeechRecognition();
             recognition.continuous = true;
             recognition.interimResults = true;
-            recognition.lang = 'fr-FR';
 
             recognition.onresult = (event) => {
                 let interimTranscript = '';
@@ -608,10 +607,9 @@ HTML_CONTENT = """
             if (isGenerating) return;
 
             const currentHistory = chats[currentChatId].history;
-            // Remove the target AI response and subsequent messages
+            // Remove target AI response and trailing user turn
             currentHistory.splice(aiMsgIndex);
 
-            // Find last user prompt
             let lastUserIndex = currentHistory.length - 1;
             while (lastUserIndex >= 0 && currentHistory[lastUserIndex].role !== "user") {
                 lastUserIndex--;
@@ -620,7 +618,6 @@ HTML_CONTENT = """
             if (lastUserIndex < 0) return;
 
             const lastUserMsg = currentHistory[lastUserIndex];
-            // Remove user message from history because sendMessage will push it back
             currentHistory.splice(lastUserIndex, 1);
             saveChats();
 
@@ -637,7 +634,6 @@ HTML_CONTENT = """
             inputEl.value = msgToEdit.content;
             autoExpand(inputEl);
 
-            // Truncate history from this message onward
             currentHistory.splice(msgIndex);
             saveChats();
             renderChatHistory();
@@ -687,7 +683,7 @@ HTML_CONTENT = """
             } else if (role === "user") {
                 const editBtn = document.createElement("button");
                 editBtn.className = "action-btn";
-                editBtn.innerText = "✏️ Edit";
+                editBtn.innerText = "✏️️ Edit";
                 editBtn.onclick = () => editUserMessage(msgIndex);
                 actionsDiv.appendChild(editBtn);
             }
@@ -758,7 +754,6 @@ def chat(request: ChatRequest):
 
         contents.append(types.Content(role=msg.role, parts=parts))
 
-    # Current turn
     current_parts = []
     if request.file:
         file_bytes = base64.b64decode(request.file.data_base64)
@@ -775,7 +770,7 @@ def chat(request: ChatRequest):
         tools=tools
     )
 
-    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash"]
+    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
 
     def generate_stream():
         last_error = ""
@@ -794,8 +789,8 @@ def chat(request: ChatRequest):
                 last_error = str(model_err)
                 continue
 
-        if "429" in last_error and request.enable_search:
-            yield "*(Web search rate limit reached — generating direct response...)*\n\n"
+        # Fallback if Web Search rate limit (429) hit
+        if request.enable_search:
             fallback_config = types.GenerateContentConfig(
                 system_instruction=request.system_instruction,
                 tools=[]
