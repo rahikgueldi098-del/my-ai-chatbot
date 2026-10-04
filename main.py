@@ -185,6 +185,7 @@ HTML_CONTENT = """
         let webSearchEnabled = true;
         let recognition = null;
         let isRecording = false;
+        let baseTranscript = '';
 
         window.onload = () => {
             renderSidebar();
@@ -210,12 +211,12 @@ HTML_CONTENT = """
             recognition.lang = 'fr-FR';
 
             recognition.onresult = (event) => {
-                let transcript = '';
+                let currentSessionTranscript = '';
                 for (let i = event.resultIndex; i < event.results.length; i++) {
-                    transcript += event.results[i][0].transcript;
+                    currentSessionTranscript += event.results[i][0].transcript;
                 }
                 const inputEl = document.getElementById("user-input");
-                inputEl.value = transcript;
+                inputEl.value = baseTranscript + currentSessionTranscript;
                 autoExpand(inputEl);
             };
 
@@ -247,6 +248,10 @@ HTML_CONTENT = """
             } else {
                 try {
                     if (!recognition) initSpeechRecognition();
+
+                    const inputEl = document.getElementById("user-input");
+                    baseTranscript = inputEl.value ? inputEl.value.trim() + " " : "";
+
                     recognition.start();
                     isRecording = true;
                     const micBtn = document.getElementById('mic-btn');
