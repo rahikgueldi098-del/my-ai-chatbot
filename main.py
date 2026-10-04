@@ -58,19 +58,26 @@ HTML_CONTENT = """
         body { background-color: #212121; color: #ececec; display: flex; height: 100vh; overflow: hidden; }
 
         /* Sidebar Layout */
-        #sidebar { width: 260px; background-color: #171717; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 15px; gap: 15px; }
+        #sidebar { width: 260px; background-color: #171717; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 15px; gap: 12px; }
         #new-chat-btn { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 8px; padding: 10px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s; }
         #new-chat-btn:hover { background: #383838; }
 
+        /* Search Bar in Sidebar */
+        #chat-search { width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid #333; background: #212121; color: #fff; font-size: 0.85rem; outline: none; transition: 0.2s; }
+        #chat-search:focus { border-color: #555; }
+
         #history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-        .history-item { padding: 10px 12px; border-radius: 6px; font-size: 0.88rem; color: #b4b4b4; cursor: pointer; transition: 0.2s; display: flex; justify-content: space-between; align-items: center; }
+        .history-item { padding: 10px 12px; border-radius: 6px; font-size: 0.88rem; color: #b4b4b4; cursor: pointer; transition: 0.2s; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
         .history-item:hover { background: #2f2f2f; color: #fff; }
         .history-item.active { background: #212121; color: #fff; font-weight: 500; }
         .history-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
 
-        .delete-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; border-radius: 4px; display: none; }
-        .history-item:hover .delete-btn { display: block; }
-        .delete-btn:hover { color: #ff5555; background: #3a2222; }
+        .history-actions { display: none; gap: 4px; align-items: center; }
+        .history-item:hover .history-actions { display: flex; }
+        .item-action-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.85rem; padding: 2px 4px; border-radius: 4px; transition: 0.2s; }
+        .item-action-btn:hover { color: #fff; background: #3a3a3a; }
+        .rename-btn:hover { color: #38bdf8 !important; }
+        .delete-btn:hover { color: #ff5555 !important; }
 
         /* Sidebar Export Tools */
         .export-box { border-top: 1px solid #333; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
@@ -144,6 +151,7 @@ HTML_CONTENT = """
 <body>
     <div id="sidebar">
         <button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+        <input type="text" id="chat-search" placeholder="🔍 Rechercher..." oninput="renderSidebar()">
         <div id="history-list"></div>
 
         <div class="export-box">
@@ -178,7 +186,7 @@ HTML_CONTENT = """
             </div>
             <div id="input-container">
                 <input type="file" id="file-input" accept="image/*,.pdf,.txt,.csv,.md,.json,.py,.js,.html,.css" onchange="handleFileSelect(event)">
-                <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Joindre un fichier (Image, PDF, TXT, CSV...)">📎</button>
+                <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Joindre un fichier">📎</button>
                 <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Dictée vocale">🎙</button>
                 <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter pour ligne suivante)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
                 <button id="send-btn" onclick="handleSendOrStop()">Send</button>
@@ -306,8 +314,19 @@ HTML_CONTENT = """
             loadChat(currentChatId);
         }
 
+        function renameChat(id, event) {
+            if (event) event.stopPropagation();
+            const currentTitle = chats[id]?.title || "Discussion";
+            const newTitle = prompt("Renommer la discussion :", currentTitle);
+            if (newTitle !== null && newTitle.trim() !== "") {
+                chats[id].title = newTitle.trim();
+                saveChats();
+                renderSidebar();
+            }
+        }
+
         function deleteChat(id, event) {
-            event.stopPropagation();
+            if (event) event.stopPropagation();
             delete chats[id];
             saveChats();
 
@@ -325,25 +344,51 @@ HTML_CONTENT = """
 
         function renderSidebar() {
             const listEl = document.getElementById("history-list");
+            const searchQuery = (document.getElementById("chat-search")?.value || "").toLowerCase().trim();
             listEl.innerHTML = "";
+
             const keys = Object.keys(chats).sort((a, b) => b - a);
 
             keys.forEach(id => {
+                const chat = chats[id];
+                const title = chat.title || "Discussion";
+
+                // Match query against chat title or prompt content
+                const matchesTitle = title.toLowerCase().includes(searchQuery);
+                const matchesHistory = chat.history?.some(m => m.content?.toLowerCase().includes(searchQuery));
+
+                if (searchQuery && !matchesTitle && !matchesHistory) {
+                    return; // Skip non-matching chats
+                }
+
                 const item = document.createElement("div");
                 item.className = `history-item ${id === currentChatId ? 'active' : ''}`;
 
                 const titleSpan = document.createElement("span");
                 titleSpan.className = "history-title";
-                titleSpan.innerText = chats[id].title || "Discussion";
+                titleSpan.innerText = title;
+                titleSpan.ondblclick = (e) => renameChat(id, e);
+
+                const actionsDiv = document.createElement("div");
+                actionsDiv.className = "history-actions";
+
+                const renameBtn = document.createElement("button");
+                renameBtn.className = "item-action-btn rename-btn";
+                renameBtn.innerHTML = "✏️";
+                renameBtn.title = "Renommer la discussion";
+                renameBtn.onclick = (e) => renameChat(id, e);
 
                 const delBtn = document.createElement("button");
-                delBtn.className = "delete-btn";
-                delBtn.innerHTML = "🗑";
+                delBtn.className = "item-action-btn delete-btn";
+                delBtn.innerHTML = "🗑️";
                 delBtn.title = "Supprimer la discussion";
                 delBtn.onclick = (e) => deleteChat(id, e);
 
+                actionsDiv.appendChild(renameBtn);
+                actionsDiv.appendChild(delBtn);
+
                 item.appendChild(titleSpan);
-                item.appendChild(delBtn);
+                item.appendChild(actionsDiv);
                 item.onclick = () => loadChat(id);
                 listEl.appendChild(item);
             });
@@ -453,7 +498,6 @@ HTML_CONTENT = """
                 const base64Data = e.target.result.split(',')[1];
                 let mimeType = file.type || 'text/plain';
 
-                // Fallback mime types based on extension
                 if (file.name.endsWith('.csv')) mimeType = 'text/csv';
                 else if (file.name.endsWith('.pdf')) mimeType = 'application/pdf';
                 else if (file.name.endsWith('.md')) mimeType = 'text/markdown';
@@ -553,7 +597,6 @@ HTML_CONTENT = """
                 renderSidebar();
             }
 
-            // Append user turn
             currentHistory.push({ role: "user", content: text, file: activeFile });
             saveChats();
 
@@ -571,7 +614,6 @@ HTML_CONTENT = """
             abortController = new AbortController();
             updateSendButton(true);
 
-            // Extract prompt history before current turn
             const historyForBackend = currentHistory.slice(0, -1);
 
             try {
