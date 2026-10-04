@@ -769,7 +769,7 @@ def chat(request: ChatRequest):
         tools=tools
     )
 
-    model_name = "gemini-2.5-flash"
+    model_name = "gemini-3.8-flash"
 
     def generate_stream():
         try:
@@ -782,7 +782,7 @@ def chat(request: ChatRequest):
                 if chunk.text:
                     yield chunk.text
         except Exception as err:
-            # Fallback automatique sans recherche si le quota de recherche Web (429) est atteint
+            # Fallback automatic without web search if search rate limit (429) hit
             if request.enable_search:
                 fallback_config = types.GenerateContentConfig(
                     system_instruction=request.system_instruction,
