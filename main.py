@@ -239,9 +239,11 @@ def chat(request: ChatRequest):
         )
     )
 
-    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+    # Modèles valides dans l'API Gemini
+    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
     def generate_stream():
+        last_error = ""
         for model_name in models_to_try:
             try:
                 response_stream = client.models.generate_content_stream(
@@ -251,13 +253,11 @@ def chat(request: ChatRequest):
                 for chunk in response_stream:
                     if chunk.text:
                         yield chunk.text
-                return  # Streaming successful, exit generator
+                return  # Succès du streaming
             except Exception as model_err:
-                err_str = str(model_err)
-                if any(code in err_str for code in ["503", "429", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "NOT_FOUND"]):
-                    continue
-                yield f"Error: {err_str}"
-                return
-        yield "All model endpoints are currently busy. Please try again in a moment."
+                last_error = str(model_err)
+                continue
+
+        yield f"Erreur API : {last_error}"
 
     return StreamingResponse(generate_stream(), media_type="text/plain")
