@@ -1,4 +1,5 @@
 import os
+import base64
 from typing import List, Optional
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -15,13 +16,20 @@ client = genai.Client(api_key=api_key) if api_key else None
 app = FastAPI(title="ChatGPT Clone")
 
 
+class FileData(BaseModel):
+    mime_type: str
+    data_base64: str
+
+
 class ChatMessage(BaseModel):
     role: str  # "user" or "model"
     content: str
+    file: Optional[FileData] = None
 
 
 class ChatRequest(BaseModel):
     message: str
+    file: Optional[FileData] = None
     history: Optional[List[ChatMessage]] = []
 
 
@@ -47,12 +55,11 @@ HTML_CONTENT = """
         #new-chat-btn:hover { background: #383838; }
 
         #history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-        .history-item { padding: 10px 12px; border-radius: 6px; font-size: 0.88rem; color: #b4b4b4; cursor: pointer; transition: 0.2s; display: flex; justify-content: space-between; align-items: center; group: true; }
+        .history-item { padding: 10px 12px; border-radius: 6px; font-size: 0.88rem; color: #b4b4b4; cursor: pointer; transition: 0.2s; display: flex; justify-content: space-between; align-items: center; }
         .history-item:hover { background: #2f2f2f; color: #fff; }
         .history-item.active { background: #212121; color: #fff; font-weight: 500; }
         .history-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
 
-        /* Delete button */
         .delete-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; border-radius: 4px; display: none; }
         .history-item:hover .delete-btn { display: block; }
         .delete-btn:hover { color: #ff5555; background: #3a2222; }
@@ -65,21 +72,28 @@ HTML_CONTENT = """
         .user { align-self: flex-end; background-color: #303030; color: #fff; border-bottom-right-radius: 2px; }
         .model { align-self: flex-start; background-color: #212121; color: #ececec; border-bottom-left-radius: 2px; border: 1px solid #333; width: 100%; }
 
-        /* Markdown formatting styles */
+        .message img { max-width: 100%; border-radius: 8px; margin-top: 8px; }
         .message p { margin-bottom: 8px; }
         .message p:last-child { margin-bottom: 0; }
         .message ul, .message ol { margin-left: 20px; margin-bottom: 8px; }
         .message code { background: #2f2f2f; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.9em; }
 
-        /* Code Block Container with Copy Button */
         .code-container { position: relative; margin: 10px 0; }
         .message pre { background: #0d1117; padding: 14px; border-radius: 8px; overflow-x: auto; border: 1px solid #30363d; margin: 0; }
         .message pre code { background: transparent; padding: 0; }
         .copy-btn { position: absolute; top: 8px; right: 8px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; font-size: 0.75rem; cursor: pointer; transition: 0.2s; }
         .copy-btn:hover { background: #30363d; color: #fff; }
 
-        /* Multi-line Auto-Expanding Textarea */
-        #input-container { padding: 20px; max-width: 800px; width: 100%; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
+        /* Input Area & Attachment Preview */
+        #input-wrapper { padding: 20px; max-width: 800px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+        #file-preview { display: none; align-items: center; gap: 10px; background: #2f2f2f; padding: 8px 12px; border-radius: 8px; border: 1px solid #424242; width: fit-content; font-size: 0.85rem; }
+        #file-preview img { height: 40px; width: 40px; object-fit: cover; border-radius: 4px; }
+        #remove-file-btn { background: transparent; border: none; color: #ff5555; cursor: pointer; font-size: 1rem; margin-left: 6px; }
+
+        #input-container { display: flex; gap: 10px; align-items: flex-end; }
+        #file-input { display: none; }
+        #attach-btn { height: 48px; width: 48px; border-radius: 24px; border: 1px solid #424242; background: #2f2f2f; color: #fff; font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+        #attach-btn:hover { background: #383838; }
         #user-input { flex: 1; padding: 12px 16px; border-radius: 18px; border: 1px solid #424242; background: #2f2f2f; color: #fff; outline: none; font-size: 1rem; resize: none; max-height: 150px; min-height: 48px; line-height: 1.4; }
         #user-input:focus { border-color: #666; }
         #send-btn { height: 48px; padding: 0 20px; border-radius: 24px; border: none; background: #fff; color: #000; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
@@ -95,15 +109,25 @@ HTML_CONTENT = """
     <div id="main-container">
         <header>AI Assistant</header>
         <div id="chat-box"></div>
-        <div id="input-container">
-            <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter pour ligne suivante)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
-            <button id="send-btn" onclick="sendMessage()">Send</button>
+        <div id="input-wrapper">
+            <div id="file-preview">
+                <img id="preview-img" src="" alt="preview">
+                <span id="file-name"></span>
+                <button id="remove-file-btn" onclick="clearFile()">✕</button>
+            </div>
+            <div id="input-container">
+                <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
+                <button id="attach-btn" onclick="document.getElementById('file-input').click()" title="Joindre un fichier">📎</button>
+                <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter pour ligne suivante)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
+                <button id="send-btn" onclick="sendMessage()">Send</button>
+            </div>
         </div>
     </div>
 
     <script>
         let currentChatId = null;
         let chats = JSON.parse(localStorage.getItem('ai_chats') || '{}');
+        let currentFile = null;
 
         window.onload = () => {
             renderSidebar();
@@ -178,9 +202,34 @@ HTML_CONTENT = """
 
             const history = chats[id]?.history || [];
             history.forEach(msg => {
-                appendMessage(msg.role, msg.content, false);
+                appendMessage(msg.role, msg.content, msg.file);
             });
             hljs.highlightAll();
+        }
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const base64Data = e.target.result.split(',')[1];
+                currentFile = {
+                    mime_type: file.type,
+                    data_base64: base64Data
+                };
+
+                document.getElementById("preview-img").src = e.target.result;
+                document.getElementById("file-name").innerText = file.name;
+                document.getElementById("file-preview").style.display = "flex";
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function clearFile() {
+            currentFile = null;
+            document.getElementById("file-input").value = "";
+            document.getElementById("file-preview").style.display = "none";
         }
 
         function autoExpand(field) {
@@ -205,7 +254,7 @@ HTML_CONTENT = """
             const inputEl = document.getElementById("user-input");
             const btnEl = document.getElementById("send-btn");
             const text = inputEl.value.trim();
-            if (!text) return;
+            if (!text && !currentFile) return;
 
             if (!currentChatId || !chats[currentChatId]) {
                 startNewChat();
@@ -214,24 +263,28 @@ HTML_CONTENT = """
             const currentHistory = chats[currentChatId].history;
 
             if (currentHistory.length === 0) {
-                chats[currentChatId].title = text.length > 25 ? text.substring(0, 25) + "..." : text;
+                const titleText = text || "Image envoyée";
+                chats[currentChatId].title = titleText.length > 25 ? titleText.substring(0, 25) + "..." : titleText;
                 renderSidebar();
             }
 
-            appendMessage("user", text, true);
+            const activeFile = currentFile;
+            appendMessage("user", text, activeFile);
+
             inputEl.value = "";
             inputEl.style.height = "48px";
+            clearFile();
             inputEl.disabled = true;
             btnEl.disabled = true;
 
-            const botMessageEl = appendMessage("model", "", false);
+            const botMessageEl = appendMessage("model", "", null);
             let accumulatedText = "";
 
             try {
                 const response = await fetch("/chat", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ message: text, history: currentHistory })
+                    body: JSON.stringify({ message: text, file: activeFile, history: currentHistory })
                 });
 
                 if (!response.ok) {
@@ -256,7 +309,7 @@ HTML_CONTENT = """
                 hljs.highlightAll();
                 addCopyButtons(botMessageEl);
 
-                currentHistory.push({ role: "user", content: text });
+                currentHistory.push({ role: "user", content: text, file: activeFile });
                 currentHistory.push({ role: "model", content: accumulatedText });
                 saveChats();
 
@@ -291,15 +344,25 @@ HTML_CONTENT = """
             });
         }
 
-        function appendMessage(role, text, isUserInput = false) {
+        function appendMessage(role, text, file = null) {
             const chatBox = document.getElementById("chat-box");
             const msgDiv = document.createElement("div");
             msgDiv.className = `message ${role}`;
 
+            if (file) {
+                const img = document.createElement("img");
+                img.src = `data:${file.mime_type};base64,${file.data_base64}`;
+                msgDiv.appendChild(img);
+            }
+
             if (role === "user") {
-                msgDiv.innerText = text;
+                const textSpan = document.createElement("div");
+                textSpan.innerText = text;
+                msgDiv.appendChild(textSpan);
             } else {
-                msgDiv.innerHTML = text ? marked.parse(text) : "...";
+                const textSpan = document.createElement("div");
+                textSpan.innerHTML = text ? marked.parse(text) : "...";
+                msgDiv.appendChild(textSpan);
             }
 
             chatBox.appendChild(msgDiv);
@@ -327,20 +390,26 @@ def chat(request: ChatRequest):
         return StreamingResponse(err_gen(), media_type="text/plain")
 
     contents = []
-    for msg in request.history:
-        contents.append(
-            types.Content(
-                role=msg.role,
-                parts=[types.Part.from_text(text=msg.content)]
-            )
-        )
 
-    contents.append(
-        types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=request.message)]
-        )
-    )
+    for msg in request.history:
+        parts = []
+        if msg.file:
+            file_bytes = base64.b64decode(msg.file.data_base64)
+            parts.append(types.Part.from_bytes(data=file_bytes, mime_type=msg.file.mime_type))
+        if msg.content:
+            parts.append(types.Part.from_text(text=msg.content))
+
+        contents.append(types.Content(role=msg.role, parts=parts))
+
+    # Current turn
+    current_parts = []
+    if request.file:
+        file_bytes = base64.b64decode(request.file.data_base64)
+        current_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=request.file.mime_type))
+    if request.message:
+        current_parts.append(types.Part.from_text(text=request.message))
+
+    contents.append(types.Content(role="user", parts=current_parts))
 
     models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash"]
 
