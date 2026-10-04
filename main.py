@@ -246,8 +246,8 @@ def chat(request: ChatRequest):
         )
     )
 
-    # Noms de modèles officiellement pris en charge
-    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+    # Modèles actifs selon la réponse officielle de l'API Google
+    models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash"]
 
     def generate_stream():
         last_error = ""
