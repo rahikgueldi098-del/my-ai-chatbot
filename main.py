@@ -200,7 +200,7 @@ HTML_CONTENT = """
         function initSpeechRecognition() {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             if (!SpeechRecognition) {
-                console.warn("Speech Recognition non supporté sur ce navigateur.");
+                console.warn("Speech Recognition non supporte sur ce navigateur.");
                 return;
             }
 
@@ -222,7 +222,7 @@ HTML_CONTENT = """
             recognition.onerror = (event) => {
                 console.error("Speech recognition error:", event.error);
                 if (event.error === 'not-allowed') {
-                    alert("Accès au microphone refusé. Veuillez autoriser le microphone dans la barre d'adresse de votre navigateur.");
+                    alert("Acces au microphone meconnu ou refuse. Veuillez l'autoriser.");
                 } else if (event.error !== 'no-speech') {
                     alert("Erreur de reconnaissance vocale : " + event.error);
                 }
@@ -237,7 +237,7 @@ HTML_CONTENT = """
         function toggleSpeechRecognition() {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             if (!SpeechRecognition) {
-                alert("Votre navigateur ne supporte pas la dictée vocale. Veuillez utiliser Google Chrome ou Microsoft Edge.");
+                alert("Votre navigateur ne supporte pas la dictee vocale. Veuillez utiliser Google Chrome ou Microsoft Edge.");
                 return;
             }
 
@@ -251,9 +251,9 @@ HTML_CONTENT = """
                     isRecording = true;
                     const micBtn = document.getElementById('mic-btn');
                     micBtn.classList.add('recording');
-                    micBtn.title = 'Arrêter l\'enregistrement';
+                    micBtn.title = "Arreter l'enregistrement";
                 } catch (e) {
-                    console.error("Erreur lancement dictée :", e);
+                    console.error("Erreur lancement dictee :", e);
                 }
             }
         }
@@ -263,7 +263,7 @@ HTML_CONTENT = """
             const micBtn = document.getElementById('mic-btn');
             if (micBtn) {
                 micBtn.classList.remove('recording');
-                micBtn.title = 'Dictée vocale';
+                micBtn.title = "Dictee vocale";
             }
         }
 
@@ -397,7 +397,7 @@ HTML_CONTENT = """
 
         function speakText(btn, text) {
             if (!('speechSynthesis' in window)) {
-                alert("La synthèse vocale n'est pas supportée par votre navigateur.");
+                alert("La synthese vocale n'est pas supportee par votre navigateur.");
                 return;
             }
 
@@ -478,7 +478,7 @@ HTML_CONTENT = """
             const currentHistory = chats[currentChatId].history;
 
             if (currentHistory.length === 0) {
-                const titleText = text || "Image envoyée";
+                const titleText = text || "Image envoyee";
                 chats[currentChatId].title = titleText.length > 25 ? titleText.substring(0, 25) + "..." : titleText;
                 renderSidebar();
             }
