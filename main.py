@@ -47,9 +47,15 @@ HTML_CONTENT = """
         #new-chat-btn:hover { background: #383838; }
 
         #history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-        .history-item { padding: 10px 12px; border-radius: 6px; font-size: 0.88rem; color: #b4b4b4; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: 0.2s; display: flex; justify-content: space-between; align-items: center; }
+        .history-item { padding: 10px 12px; border-radius: 6px; font-size: 0.88rem; color: #b4b4b4; cursor: pointer; transition: 0.2s; display: flex; justify-content: space-between; align-items: center; group: true; }
         .history-item:hover { background: #2f2f2f; color: #fff; }
         .history-item.active { background: #212121; color: #fff; font-weight: 500; }
+        .history-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+
+        /* Delete button */
+        .delete-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; border-radius: 4px; display: none; }
+        .history-item:hover .delete-btn { display: block; }
+        .delete-btn:hover { color: #ff5555; background: #3a2222; }
 
         /* Main Chat Area */
         #main-container { flex: 1; display: flex; flex-direction: column; height: 100vh; }
@@ -121,6 +127,23 @@ HTML_CONTENT = """
             loadChat(currentChatId);
         }
 
+        function deleteChat(id, event) {
+            event.stopPropagation();
+            delete chats[id];
+            saveChats();
+
+            const keys = Object.keys(chats).sort((a, b) => b - a);
+            if (id === currentChatId) {
+                if (keys.length > 0) {
+                    loadChat(keys[0]);
+                } else {
+                    startNewChat();
+                }
+            } else {
+                renderSidebar();
+            }
+        }
+
         function renderSidebar() {
             const listEl = document.getElementById("history-list");
             listEl.innerHTML = "";
@@ -129,7 +152,19 @@ HTML_CONTENT = """
             keys.forEach(id => {
                 const item = document.createElement("div");
                 item.className = `history-item ${id === currentChatId ? 'active' : ''}`;
-                item.innerText = chats[id].title || "Discussion";
+
+                const titleSpan = document.createElement("span");
+                titleSpan.className = "history-title";
+                titleSpan.innerText = chats[id].title || "Discussion";
+
+                const delBtn = document.createElement("button");
+                delBtn.className = "delete-btn";
+                delBtn.innerHTML = "🗑️";
+                delBtn.title = "Supprimer la discussion";
+                delBtn.onclick = (e) => deleteChat(id, e);
+
+                item.appendChild(titleSpan);
+                item.appendChild(delBtn);
                 item.onclick = () => loadChat(id);
                 listEl.appendChild(item);
             });
