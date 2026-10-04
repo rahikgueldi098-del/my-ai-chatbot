@@ -1,7 +1,7 @@
 import os
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
@@ -130,7 +130,8 @@ HTML_CONTENT = """
             inputEl.disabled = true;
             btnEl.disabled = true;
 
-            const botMessageEl = appendMessage("model", "Thinking...");
+            const botMessageEl = appendMessage("model", "");
+            let accumulatedText = "";
 
             try {
                 const response = await fetch("/chat", {
@@ -139,21 +140,31 @@ HTML_CONTENT = """
                     body: JSON.stringify({ message: text, history: conversationHistory })
                 });
 
-                const data = await response.json();
-
                 if (!response.ok) {
-                    botMessageEl.innerText = "Error: " + (data.detail || "Server returned an error");
+                    botMessageEl.innerText = "Error communicating with server.";
                     return;
                 }
 
-                if (data.response) {
-                    botMessageEl.innerHTML = marked.parse(data.response);
-                    hljs.highlightAll();
-                    addCopyButtons(botMessageEl);
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder("utf-8");
 
-                    conversationHistory.push({ role: "user", content: text });
-                    conversationHistory.push({ role: "model", content: data.response });
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value, { stream: true });
+                    accumulatedText += chunk;
+
+                    botMessageEl.innerHTML = marked.parse(accumulatedText);
+                    document.getElementById("chat-box").scrollTop = document.getElementById("chat-box").scrollHeight;
                 }
+
+                hljs.highlightAll();
+                addCopyButtons(botMessageEl);
+
+                conversationHistory.push({ role: "user", content: text });
+                conversationHistory.push({ role: "model", content: accumulatedText });
+
             } catch (err) {
                 botMessageEl.innerText = "Error connecting to server.";
             } finally {
@@ -192,7 +203,7 @@ HTML_CONTENT = """
             if (role === "user") {
                 msgDiv.innerText = text;
             } else {
-                msgDiv.innerHTML = text === "Thinking..." ? text : marked.parse(text);
+                msgDiv.innerHTML = text ? marked.parse(text) : "...";
             }
 
             chatBox.appendChild(msgDiv);
@@ -212,42 +223,41 @@ def serve_ui():
 
 @app.post("/chat")
 def chat(request: ChatRequest):
-    try:
-        contents = []
-        for msg in request.history:
-            contents.append(
-                types.Content(
-                    role=msg.role,
-                    parts=[types.Part.from_text(text=msg.content)]
-                )
-            )
-
+    contents = []
+    for msg in request.history:
         contents.append(
             types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=request.message)]
+                role=msg.role,
+                parts=[types.Part.from_text(text=msg.content)]
             )
         )
 
-        # Automatic model fallback list
-        models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+    contents.append(
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=request.message)]
+        )
+    )
 
+    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+
+    def generate_stream():
         for model_name in models_to_try:
             try:
-                response = client.models.generate_content(
+                response_stream = client.models.generate_content_stream(
                     model=model_name,
                     contents=contents
                 )
-                return {"response": response.text}
+                for chunk in response_stream:
+                    if chunk.text:
+                        yield chunk.text
+                return  # Streaming successful, exit generator
             except Exception as model_err:
                 err_str = str(model_err)
-                # Catch 503 (Server Busy), 429 (Quota Exceeded), and NOT_FOUND
                 if any(code in err_str for code in ["503", "429", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "NOT_FOUND"]):
                     continue
-                raise model_err
+                yield f"Error: {err_str}"
+                return
+        yield "All model endpoints are currently busy. Please try again in a moment."
 
-        raise HTTPException(status_code=429,
-                            detail="All free tier model quotas have been reached for today. Please try again later.")
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return StreamingResponse(generate_stream(), media_type="text/plain")
