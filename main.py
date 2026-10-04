@@ -9,7 +9,8 @@ from google.genai import types
 
 load_dotenv()
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+api_key = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=api_key) if api_key else None
 
 app = FastAPI(title="ChatGPT Clone")
 
@@ -223,6 +224,12 @@ def serve_ui():
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+    if not client:
+        def err_gen():
+            yield "GEMINI_API_KEY non configurée dans l'environnement."
+
+        return StreamingResponse(err_gen(), media_type="text/plain")
+
     contents = []
     for msg in request.history:
         contents.append(
@@ -239,8 +246,8 @@ def chat(request: ChatRequest):
         )
     )
 
-    # Modèles valides dans l'API Gemini
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    # Noms de modèles officiellement pris en charge
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
 
     def generate_stream():
         last_error = ""
@@ -253,7 +260,7 @@ def chat(request: ChatRequest):
                 for chunk in response_stream:
                     if chunk.text:
                         yield chunk.text
-                return  # Succès du streaming
+                return  # Succès du streaming !
             except Exception as model_err:
                 last_error = str(model_err)
                 continue
