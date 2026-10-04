@@ -588,7 +588,7 @@ HTML_CONTENT = """
                         saveChats();
                         renderChatHistory();
                     } else {
-                        currentHistory.pop(); // remove empty turn
+                        currentHistory.pop();
                         saveChats();
                         renderChatHistory();
                     }
@@ -607,7 +607,6 @@ HTML_CONTENT = """
             if (isGenerating) return;
 
             const currentHistory = chats[currentChatId].history;
-            // Remove target AI response and trailing user turn
             currentHistory.splice(aiMsgIndex);
 
             let lastUserIndex = currentHistory.length - 1;
@@ -683,7 +682,7 @@ HTML_CONTENT = """
             } else if (role === "user") {
                 const editBtn = document.createElement("button");
                 editBtn.className = "action-btn";
-                editBtn.innerText = "✏️️ Edit";
+                editBtn.innerText = "✏ Edit";
                 editBtn.onclick = () => editUserMessage(msgIndex);
                 actionsDiv.appendChild(editBtn);
             }
@@ -770,46 +769,37 @@ def chat(request: ChatRequest):
         tools=tools
     )
 
-    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
+    model_name = "gemini-2.5-flash"
 
     def generate_stream():
-        last_error = ""
-        for model_name in models_to_try:
-            try:
-                response_stream = client.models.generate_content_stream(
-                    model=model_name,
-                    contents=contents,
-                    config=config
-                )
-                for chunk in response_stream:
-                    if chunk.text:
-                        yield chunk.text
-                return
-            except Exception as model_err:
-                last_error = str(model_err)
-                continue
-
-        # Fallback if Web Search rate limit (429) hit
-        if request.enable_search:
-            fallback_config = types.GenerateContentConfig(
-                system_instruction=request.system_instruction,
-                tools=[]
+        try:
+            response_stream = client.models.generate_content_stream(
+                model=model_name,
+                contents=contents,
+                config=config
             )
-            for model_name in models_to_try:
+            for chunk in response_stream:
+                if chunk.text:
+                    yield chunk.text
+        except Exception as err:
+            # Fallback automatique sans recherche si le quota de recherche Web (429) est atteint
+            if request.enable_search:
+                fallback_config = types.GenerateContentConfig(
+                    system_instruction=request.system_instruction,
+                    tools=[]
+                )
                 try:
-                    response_stream = client.models.generate_content_stream(
+                    fallback_stream = client.models.generate_content_stream(
                         model=model_name,
                         contents=contents,
                         config=fallback_config
                     )
-                    for chunk in response_stream:
+                    for chunk in fallback_stream:
                         if chunk.text:
                             yield chunk.text
-                    return
-                except Exception as model_err:
-                    last_error = str(model_err)
-                    continue
-
-        yield f"Erreur API : {last_error}"
+                except Exception as fb_err:
+                    yield f"Erreur API : {str(fb_err)}"
+            else:
+                yield f"Erreur API : {str(err)}"
 
     return StreamingResponse(generate_stream(), media_type="text/plain")
