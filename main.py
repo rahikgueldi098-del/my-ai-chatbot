@@ -122,7 +122,7 @@ HTML_CONTENT = """
                     <option value="You are a helpful, smart, and precise AI assistant.">🤖 Default Assistant</option>
                     <option value="You are a Senior Full-Stack Software Engineer. Provide clean, efficient code and explain tech concepts concisely.">💻 Senior Engineer</option>
                     <option value="You are a strict, ultra-concise assistant. Answer using minimal words and direct bullet points only. No fluff.">⚡ Ultra-Concise Mode</option>
-                    <option value="You are a creative writer and storytelling assistant with a rich, expressive vocabulary.">✍️ Creative Writer</option>
+                    <option value="You are a creative writer and storytelling assistant with a rich, expressive vocabulary.">✍️️ Creative Writer</option>
                 </select>
             </div>
         </header>
@@ -214,7 +214,7 @@ HTML_CONTENT = """
 
                 const delBtn = document.createElement("button");
                 delBtn.className = "delete-btn";
-                delBtn.innerHTML = "🗑️️";
+                delBtn.innerHTML = "🗑";
                 delBtn.title = "Supprimer la discussion";
                 delBtn.onclick = (e) => deleteChat(id, e);
 
@@ -460,6 +460,7 @@ def chat(request: ChatRequest):
 
     def generate_stream():
         last_error = ""
+        # Primary attempt with configured tools (Web Search)
         for model_name in models_to_try:
             try:
                 response_stream = client.models.generate_content_stream(
@@ -474,6 +475,28 @@ def chat(request: ChatRequest):
             except Exception as model_err:
                 last_error = str(model_err)
                 continue
+
+        # Fallback attempt if Web Search hits 429 quota limits
+        if "429" in last_error and request.enable_search:
+            yield "*(Web search rate limit reached — generating direct response...)*\n\n"
+            fallback_config = types.GenerateContentConfig(
+                system_instruction=request.system_instruction,
+                tools=[]  # Disable tools for direct fallback
+            )
+            for model_name in models_to_try:
+                try:
+                    response_stream = client.models.generate_content_stream(
+                        model=model_name,
+                        contents=contents,
+                        config=fallback_config
+                    )
+                    for chunk in response_stream:
+                        if chunk.text:
+                            yield chunk.text
+                    return
+                except Exception as model_err:
+                    last_error = str(model_err)
+                    continue
 
         yield f"Erreur API : {last_error}"
 
