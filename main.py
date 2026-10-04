@@ -29,6 +29,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    system_instruction: Optional[str] = "You are a helpful, smart, and precise AI assistant."
     file: Optional[FileData] = None
     history: Optional[List[ChatMessage]] = []
 
@@ -66,7 +67,9 @@ HTML_CONTENT = """
 
         /* Main Chat Area */
         #main-container { flex: 1; display: flex; flex-direction: column; height: 100vh; }
-        header { padding: 15px 20px; border-bottom: 1px solid #333; text-align: center; font-weight: 600; font-size: 1.1rem; background: #171717; }
+        header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: #171717; font-weight: 600; }
+        #persona-select { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 6px; padding: 6px 12px; font-size: 0.88rem; outline: none; cursor: pointer; }
+
         #chat-box { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 800px; width: 100%; margin: 0 auto; }
         .message { display: flex; flex-direction: column; gap: 6px; max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.95rem; line-height: 1.6; }
         .user { align-self: flex-end; background-color: #303030; color: #fff; border-bottom-right-radius: 2px; }
@@ -107,7 +110,15 @@ HTML_CONTENT = """
     </div>
 
     <div id="main-container">
-        <header>AI Assistant</header>
+        <header>
+            <span>AI Assistant</span>
+            <select id="persona-select">
+                <option value="You are a helpful, smart, and precise AI assistant.">🤖 Default Assistant</option>
+                <option value="You are a Senior Full-Stack Software Engineer. Provide clean, efficient code and explain tech concepts concisely.">💻 Senior Engineer</option>
+                <option value="You are a strict, ultra-concise assistant. Answer using minimal words and direct bullet points only. No fluff.">⚡ Ultra-Concise Mode</option>
+                <option value="You are a creative writer and storytelling assistant with a rich, expressive vocabulary.">✍️ Creative Writer</option>
+            </select>
+        </header>
         <div id="chat-box"></div>
         <div id="input-wrapper">
             <div id="file-preview">
@@ -253,6 +264,7 @@ HTML_CONTENT = """
         async function sendMessage() {
             const inputEl = document.getElementById("user-input");
             const btnEl = document.getElementById("send-btn");
+            const personaEl = document.getElementById("persona-select");
             const text = inputEl.value.trim();
             if (!text && !currentFile) return;
 
@@ -284,7 +296,12 @@ HTML_CONTENT = """
                 const response = await fetch("/chat", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ message: text, file: activeFile, history: currentHistory })
+                    body: JSON.stringify({ 
+                        message: text, 
+                        system_instruction: personaEl.value,
+                        file: activeFile, 
+                        history: currentHistory 
+                    })
                 });
 
                 if (!response.ok) {
@@ -411,6 +428,10 @@ def chat(request: ChatRequest):
 
     contents.append(types.Content(role="user", parts=current_parts))
 
+    config = types.GenerateContentConfig(
+        system_instruction=request.system_instruction
+    )
+
     models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash"]
 
     def generate_stream():
@@ -419,7 +440,8 @@ def chat(request: ChatRequest):
             try:
                 response_stream = client.models.generate_content_stream(
                     model=model_name,
-                    contents=contents
+                    contents=contents,
+                    config=config
                 )
                 for chunk in response_stream:
                     if chunk.text:
