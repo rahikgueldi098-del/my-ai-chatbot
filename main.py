@@ -171,7 +171,7 @@ HTML_CONTENT = """
             <div id="input-container">
                 <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
                 <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Joindre un fichier">📎</button>
-                <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Dictée vocale">🎙️</button>
+                <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Dictée vocale">🎙️️</button>
                 <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter pour ligne suivante)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
                 <button id="send-btn" onclick="sendMessage()">Send</button>
             </div>
@@ -186,6 +186,7 @@ HTML_CONTENT = """
         let recognition = null;
         let isRecording = false;
         let baseTranscript = '';
+        let finalizedTranscript = '';
 
         window.onload = () => {
             renderSidebar();
@@ -211,12 +212,18 @@ HTML_CONTENT = """
             recognition.lang = 'fr-FR';
 
             recognition.onresult = (event) => {
-                let currentSessionTranscript = '';
+                let interimTranscript = '';
                 for (let i = event.resultIndex; i < event.results.length; i++) {
-                    currentSessionTranscript += event.results[i][0].transcript;
+                    const transcript = event.results[i][0].transcript;
+                    if (event.results[i].isFinal) {
+                        finalizedTranscript += transcript + ' ';
+                    } else {
+                        interimTranscript += transcript;
+                    }
                 }
+
                 const inputEl = document.getElementById("user-input");
-                inputEl.value = baseTranscript + currentSessionTranscript;
+                inputEl.value = baseTranscript + finalizedTranscript + interimTranscript;
                 autoExpand(inputEl);
             };
 
@@ -251,6 +258,7 @@ HTML_CONTENT = """
 
                     const inputEl = document.getElementById("user-input");
                     baseTranscript = inputEl.value ? inputEl.value.trim() + " " : "";
+                    finalizedTranscript = '';
 
                     recognition.start();
                     isRecording = true;
