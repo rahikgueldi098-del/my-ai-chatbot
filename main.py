@@ -87,7 +87,7 @@ HTML_CONTENT = """
         .toggle-btn.active { background: #1b3a2b; color: #4ade80; border-color: #22c55e; }
 
         #chat-box { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 800px; width: 100%; margin: 0 auto; }
-        .message { display: flex; flex-direction: column; gap: 6px; max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.95rem; line-height: 1.6; }
+        .message { display: flex; flex-direction: column; gap: 6px; max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.95rem; line-height: 1.6; position: relative; }
         .user { align-self: flex-end; background-color: #303030; color: #fff; border-bottom-right-radius: 2px; }
         .model { align-self: flex-start; background-color: #212121; color: #ececec; border-bottom-left-radius: 2px; border: 1px solid #333; width: 100%; }
 
@@ -102,6 +102,11 @@ HTML_CONTENT = """
         .message pre code { background: transparent; padding: 0; }
         .copy-btn { position: absolute; top: 8px; right: 8px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; font-size: 0.75rem; cursor: pointer; transition: 0.2s; }
         .copy-btn:hover { background: #30363d; color: #fff; }
+
+        /* Action bar for model messages (Audio) */
+        .msg-actions { display: flex; gap: 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid #2a2a2a; }
+        .action-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.85rem; padding: 2px 6px; border-radius: 4px; transition: 0.2s; display: flex; align-items: center; gap: 4px; }
+        .action-btn:hover { color: #fff; background: #2f2f2f; }
 
         /* Typing Dots Animation */
         .typing-dots { display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; }
@@ -313,6 +318,29 @@ HTML_CONTENT = """
             URL.revokeObjectURL(url);
         }
 
+        function speakText(btn, text) {
+            if (!('speechSynthesis' in window)) {
+                alert("La synthèse vocale n'est pas supportée par votre navigateur.");
+                return;
+            }
+
+            if (window.speechSynthesis.speaking) {
+                window.speechSynthesis.cancel();
+                btn.innerText = "🔊 Read Aloud";
+                return;
+            }
+
+            // Strip markdown formatting for cleaner speech
+            const cleanText = text.replace(/[*_#`$]/g, '');
+            const utterance = new SpeechSynthesisUtterance(cleanText);
+
+            utterance.onstart = () => { btn.innerText = "⏹ Stop"; };
+            utterance.onend = () => { btn.innerText = "🔊 Read Aloud"; };
+            utterance.onerror = () => { btn.innerText = "🔊 Read Aloud"; };
+
+            window.speechSynthesis.speak(utterance);
+        }
+
         function handleFileSelect(event) {
             const file = event.target.files[0];
             if (!file) return;
@@ -424,6 +452,7 @@ HTML_CONTENT = """
                 hljs.highlightAll();
                 renderMath(botMessageEl.querySelector('.text-content'));
                 addCopyButtons(botMessageEl);
+                attachActions(botMessageEl, accumulatedText);
 
                 currentHistory.push({ role: "user", content: text, file: activeFile });
                 currentHistory.push({ role: "model", content: accumulatedText });
@@ -460,6 +489,20 @@ HTML_CONTENT = """
             });
         }
 
+        function attachActions(msgDiv, text) {
+            if (msgDiv.querySelector('.msg-actions')) return;
+            const actionsDiv = document.createElement("div");
+            actionsDiv.className = "msg-actions";
+
+            const speakBtn = document.createElement("button");
+            speakBtn.className = "action-btn";
+            speakBtn.innerText = "🔊 Read Aloud";
+            speakBtn.onclick = () => speakText(speakBtn, text);
+
+            actionsDiv.appendChild(speakBtn);
+            msgDiv.appendChild(actionsDiv);
+        }
+
         function appendMessage(role, text, file = null) {
             const chatBox = document.getElementById("chat-box");
             const msgDiv = document.createElement("div");
@@ -486,6 +529,7 @@ HTML_CONTENT = """
             if (role === "model" && text) {
                 renderMath(textSpan);
                 addCopyButtons(msgDiv);
+                attachActions(msgDiv, text);
             }
             return msgDiv;
         }
