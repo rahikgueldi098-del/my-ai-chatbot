@@ -66,6 +66,13 @@ HTML_CONTENT = """
         .history-item:hover .delete-btn { display: block; }
         .delete-btn:hover { color: #ff5555; background: #3a2222; }
 
+        /* Sidebar Export Tools */
+        .export-box { border-top: 1px solid #333; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+        .export-title { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+        .export-buttons { display: flex; gap: 8px; }
+        .export-btn { flex: 1; background: #2f2f2f; color: #ccc; border: 1px solid #424242; border-radius: 6px; padding: 6px; font-size: 0.8rem; cursor: pointer; text-align: center; transition: 0.2s; }
+        .export-btn:hover { background: #383838; color: #fff; }
+
         /* Main Chat Area */
         #main-container { flex: 1; display: flex; flex-direction: column; height: 100vh; }
         header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: #171717; font-weight: 600; }
@@ -111,6 +118,14 @@ HTML_CONTENT = """
     <div id="sidebar">
         <button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
         <div id="history-list"></div>
+
+        <div class="export-box">
+            <span class="export-title">Export Discussion</span>
+            <div class="export-buttons">
+                <button class="export-btn" onclick="exportChat('md')">📄 Markdown</button>
+                <button class="export-btn" onclick="exportChat('json')">📦 JSON</button>
+            </div>
+        </div>
     </div>
 
     <div id="main-container">
@@ -122,7 +137,7 @@ HTML_CONTENT = """
                     <option value="You are a helpful, smart, and precise AI assistant.">🤖 Default Assistant</option>
                     <option value="You are a Senior Full-Stack Software Engineer. Provide clean, efficient code and explain tech concepts concisely.">💻 Senior Engineer</option>
                     <option value="You are a strict, ultra-concise assistant. Answer using minimal words and direct bullet points only. No fluff.">⚡ Ultra-Concise Mode</option>
-                    <option value="You are a creative writer and storytelling assistant with a rich, expressive vocabulary.">✍️️ Creative Writer</option>
+                    <option value="You are a creative writer and storytelling assistant with a rich, expressive vocabulary.">✍️ Creative Writer</option>
                 </select>
             </div>
         </header>
@@ -236,6 +251,40 @@ HTML_CONTENT = """
                 appendMessage(msg.role, msg.content, msg.file);
             });
             hljs.highlightAll();
+        }
+
+        function exportChat(format) {
+            if (!currentChatId || !chats[currentChatId]) return;
+            const chat = chats[currentChatId];
+            const title = (chat.title || "chat").replace(/[^a-z0-9]/gi, '_').toLowerCase();
+
+            let content = "";
+            let mimeType = "";
+            let extension = "";
+
+            if (format === 'md') {
+                content = `# ${chat.title || 'Discussion'}\n\n`;
+                chat.history.forEach(msg => {
+                    const roleName = msg.role === 'user' ? 'User' : 'AI Assistant';
+                    content += `### ${roleName}\n${msg.content}\n\n---\n\n`;
+                });
+                mimeType = 'text/markdown';
+                extension = 'md';
+            } else if (format === 'json') {
+                content = JSON.stringify(chat, null, 2);
+                mimeType = 'application/json';
+                extension = 'json';
+            }
+
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${title}.${extension}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
         }
 
         function handleFileSelect(event) {
