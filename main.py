@@ -200,9 +200,10 @@ HTML_CONTENT = """
         function initSpeechRecognition() {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             if (!SpeechRecognition) {
-                document.getElementById('mic-btn').style.display = 'none';
+                console.warn("Speech Recognition non supporté sur ce navigateur.");
                 return;
             }
+
             recognition = new SpeechRecognition();
             recognition.continuous = true;
             recognition.interimResults = true;
@@ -219,7 +220,12 @@ HTML_CONTENT = """
             };
 
             recognition.onerror = (event) => {
-                console.error("Speech recognition error", event.error);
+                console.error("Speech recognition error:", event.error);
+                if (event.error === 'not-allowed') {
+                    alert("Accès au microphone refusé. Veuillez autoriser le microphone dans la barre d'adresse de votre navigateur.");
+                } else if (event.error !== 'no-speech') {
+                    alert("Erreur de reconnaissance vocale : " + event.error);
+                }
                 stopRecording();
             };
 
@@ -229,19 +235,25 @@ HTML_CONTENT = """
         }
 
         function toggleSpeechRecognition() {
-            if (!recognition) return;
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                alert("Votre navigateur ne supporte pas la dictée vocale. Veuillez utiliser Google Chrome ou Microsoft Edge.");
+                return;
+            }
+
             if (isRecording) {
-                recognition.stop();
+                if (recognition) recognition.stop();
                 stopRecording();
             } else {
                 try {
+                    if (!recognition) initSpeechRecognition();
                     recognition.start();
                     isRecording = true;
                     const micBtn = document.getElementById('mic-btn');
                     micBtn.classList.add('recording');
                     micBtn.title = 'Arrêter l\'enregistrement';
                 } catch (e) {
-                    console.error(e);
+                    console.error("Erreur lancement dictée :", e);
                 }
             }
         }
