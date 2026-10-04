@@ -103,7 +103,7 @@ HTML_CONTENT = """
         .copy-btn { position: absolute; top: 8px; right: 8px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; font-size: 0.75rem; cursor: pointer; transition: 0.2s; }
         .copy-btn:hover { background: #30363d; color: #fff; }
 
-        /* Action bar for model messages (Audio) */
+        /* Action bar for messages */
         .msg-actions { display: flex; gap: 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid #2a2a2a; }
         .action-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.85rem; padding: 2px 6px; border-radius: 4px; transition: 0.2s; display: flex; align-items: center; gap: 4px; }
         .action-btn:hover { color: #fff; background: #2f2f2f; }
@@ -130,7 +130,9 @@ HTML_CONTENT = """
 
         #user-input { flex: 1; padding: 12px 16px; border-radius: 18px; border: 1px solid #424242; background: #2f2f2f; color: #fff; outline: none; font-size: 1rem; resize: none; max-height: 150px; min-height: 48px; line-height: 1.4; }
         #user-input:focus { border-color: #666; }
-        #send-btn { height: 48px; padding: 0 20px; border-radius: 24px; border: none; background: #fff; color: #000; font-weight: 600; cursor: pointer; transition: opacity 0.2s; flex-shrink: 0; }
+
+        #send-btn { height: 48px; min-width: 70px; padding: 0 20px; border-radius: 24px; border: none; background: #fff; color: #000; font-weight: 600; cursor: pointer; transition: 0.2s; flex-shrink: 0; }
+        #send-btn.stop-btn { background: #ef4444; color: #fff; }
         #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     </style>
 </head>
@@ -171,9 +173,9 @@ HTML_CONTENT = """
             <div id="input-container">
                 <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
                 <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Joindre un fichier">📎</button>
-                <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Dictée vocale">🎙️️</button>
+                <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Dictée vocale">🎙</button>
                 <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter pour ligne suivante)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
-                <button id="send-btn" onclick="sendMessage()">Send</button>
+                <button id="send-btn" onclick="handleSendOrStop()">Send</button>
             </div>
         </div>
     </div>
@@ -188,6 +190,9 @@ HTML_CONTENT = """
         let baseTranscript = '';
         let finalizedTranscript = '';
 
+        let isGenerating = false;
+        let abortController = null;
+
         window.onload = () => {
             renderSidebar();
             const keys = Object.keys(chats);
@@ -201,10 +206,7 @@ HTML_CONTENT = """
 
         function initSpeechRecognition() {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            if (!SpeechRecognition) {
-                console.warn("Speech Recognition non supporte sur ce navigateur.");
-                return;
-            }
+            if (!SpeechRecognition) return;
 
             recognition = new SpeechRecognition();
             recognition.continuous = true;
@@ -229,11 +231,6 @@ HTML_CONTENT = """
 
             recognition.onerror = (event) => {
                 console.error("Speech recognition error:", event.error);
-                if (event.error === 'not-allowed') {
-                    alert("Acces au microphone meconnu ou refuse. Veuillez l'autoriser.");
-                } else if (event.error !== 'no-speech') {
-                    alert("Erreur de reconnaissance vocale : " + event.error);
-                }
                 stopRecording();
             };
 
@@ -245,7 +242,7 @@ HTML_CONTENT = """
         function toggleSpeechRecognition() {
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             if (!SpeechRecognition) {
-                alert("Votre navigateur ne supporte pas la dictee vocale. Veuillez utiliser Google Chrome ou Microsoft Edge.");
+                alert("Votre navigateur ne supporte pas la dictée vocale.");
                 return;
             }
 
@@ -264,9 +261,9 @@ HTML_CONTENT = """
                     isRecording = true;
                     const micBtn = document.getElementById('mic-btn');
                     micBtn.classList.add('recording');
-                    micBtn.title = "Arreter l'enregistrement";
+                    micBtn.title = "Arrêter l'enregistrement";
                 } catch (e) {
-                    console.error("Erreur lancement dictee :", e);
+                    console.error("Erreur lancement dictée :", e);
                 }
             }
         }
@@ -276,7 +273,7 @@ HTML_CONTENT = """
             const micBtn = document.getElementById('mic-btn');
             if (micBtn) {
                 micBtn.classList.remove('recording');
-                micBtn.title = "Dictee vocale";
+                micBtn.title = "Dictée vocale";
             }
         }
 
@@ -361,17 +358,21 @@ HTML_CONTENT = """
             }
         }
 
-        function loadChat(id) {
-            currentChatId = id;
-            renderSidebar();
+        function renderChatHistory() {
             const chatBox = document.getElementById("chat-box");
             chatBox.innerHTML = "";
 
-            const history = chats[id]?.history || [];
-            history.forEach(msg => {
-                appendMessage(msg.role, msg.content, msg.file);
+            const history = chats[currentChatId]?.history || [];
+            history.forEach((msg, index) => {
+                appendMessage(msg.role, msg.content, msg.file, index);
             });
             hljs.highlightAll();
+        }
+
+        function loadChat(id) {
+            currentChatId = id;
+            renderSidebar();
+            renderChatHistory();
         }
 
         function exportChat(format) {
@@ -410,7 +411,7 @@ HTML_CONTENT = """
 
         function speakText(btn, text) {
             if (!('speechSynthesis' in window)) {
-                alert("La synthese vocale n'est pas supportee par votre navigateur.");
+                alert("La synthèse vocale n'est pas supportée par votre navigateur.");
                 return;
             }
 
@@ -469,20 +470,42 @@ HTML_CONTENT = """
         function handleKeyDown(e) {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
+                handleSendOrStop();
+            }
+        }
+
+        function handleSendOrStop() {
+            if (isGenerating) {
+                if (abortController) abortController.abort();
+            } else {
                 sendMessage();
             }
         }
 
-        async function sendMessage() {
+        function updateSendButton(generating) {
+            isGenerating = generating;
+            const btnEl = document.getElementById("send-btn");
+            if (generating) {
+                btnEl.innerText = "⏹ Stop";
+                btnEl.classList.add("stop-btn");
+            } else {
+                btnEl.innerText = "Send";
+                btnEl.classList.remove("stop-btn");
+            }
+        }
+
+        async function sendMessage(overrideText = null, overrideFile = null) {
             if (isRecording) {
                 toggleSpeechRecognition();
             }
 
             const inputEl = document.getElementById("user-input");
-            const btnEl = document.getElementById("send-btn");
             const personaEl = document.getElementById("persona-select");
-            const text = inputEl.value.trim();
-            if (!text && !currentFile) return;
+
+            const text = overrideText !== null ? overrideText : inputEl.value.trim();
+            const activeFile = overrideFile !== null ? overrideFile : currentFile;
+
+            if (!text && !activeFile) return;
 
             if (!currentChatId || !chats[currentChatId]) {
                 startNewChat();
@@ -491,34 +514,42 @@ HTML_CONTENT = """
             const currentHistory = chats[currentChatId].history;
 
             if (currentHistory.length === 0) {
-                const titleText = text || "Image envoyee";
+                const titleText = text || "Image envoyée";
                 chats[currentChatId].title = titleText.length > 25 ? titleText.substring(0, 25) + "..." : titleText;
                 renderSidebar();
             }
 
-            const activeFile = currentFile;
-            appendMessage("user", text, activeFile);
+            // Append user turn
+            currentHistory.push({ role: "user", content: text, file: activeFile });
+            saveChats();
 
             inputEl.value = "";
             inputEl.style.height = "48px";
             clearFile();
             inputEl.disabled = true;
-            btnEl.disabled = true;
 
-            const botMessageEl = appendMessage("model", "", null);
+            renderChatHistory();
+
+            const botMessageEl = appendMessage("model", "", null, currentHistory.length);
             botMessageEl.querySelector('.text-content').innerHTML = '<div class="typing-dots"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
 
             let accumulatedText = "";
+            abortController = new AbortController();
+            updateSendButton(true);
+
+            // Extract prompt history before current turn
+            const historyForBackend = currentHistory.slice(0, -1);
 
             try {
                 const response = await fetch("/chat", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
+                    signal: abortController.signal,
                     body: JSON.stringify({ 
                         message: text, 
                         system_instruction: personaEl.value,
                         file: activeFile, 
-                        history: currentHistory,
+                        history: historyForBackend,
                         enable_search: webSearchEnabled
                     })
                 });
@@ -545,19 +576,73 @@ HTML_CONTENT = """
                 hljs.highlightAll();
                 renderMath(botMessageEl.querySelector('.text-content'));
                 addCopyButtons(botMessageEl);
-                attachActions(botMessageEl, accumulatedText);
 
-                currentHistory.push({ role: "user", content: text, file: activeFile });
                 currentHistory.push({ role: "model", content: accumulatedText });
                 saveChats();
+                renderChatHistory();
 
             } catch (err) {
-                botMessageEl.querySelector('.text-content').innerText = "Erreur de connexion au serveur.";
+                if (err.name === 'AbortError') {
+                    if (accumulatedText.trim()) {
+                        accumulatedText += " *(Interrompu)*";
+                        currentHistory.push({ role: "model", content: accumulatedText });
+                        saveChats();
+                        renderChatHistory();
+                    } else {
+                        currentHistory.pop(); // remove empty turn
+                        saveChats();
+                        renderChatHistory();
+                    }
+                } else {
+                    botMessageEl.querySelector('.text-content').innerText = "Erreur de connexion au serveur.";
+                }
             } finally {
+                abortController = null;
+                updateSendButton(false);
                 inputEl.disabled = false;
-                btnEl.disabled = false;
                 inputEl.focus();
             }
+        }
+
+        function regenerateResponse(aiMsgIndex) {
+            if (isGenerating) return;
+
+            const currentHistory = chats[currentChatId].history;
+            // Remove the target AI response and subsequent messages
+            currentHistory.splice(aiMsgIndex);
+
+            // Find last user prompt
+            let lastUserIndex = currentHistory.length - 1;
+            while (lastUserIndex >= 0 && currentHistory[lastUserIndex].role !== "user") {
+                lastUserIndex--;
+            }
+
+            if (lastUserIndex < 0) return;
+
+            const lastUserMsg = currentHistory[lastUserIndex];
+            // Remove user message from history because sendMessage will push it back
+            currentHistory.splice(lastUserIndex, 1);
+            saveChats();
+
+            sendMessage(lastUserMsg.content, lastUserMsg.file);
+        }
+
+        function editUserMessage(msgIndex) {
+            if (isGenerating) return;
+
+            const currentHistory = chats[currentChatId].history;
+            const msgToEdit = currentHistory[msgIndex];
+
+            const inputEl = document.getElementById("user-input");
+            inputEl.value = msgToEdit.content;
+            autoExpand(inputEl);
+
+            // Truncate history from this message onward
+            currentHistory.splice(msgIndex);
+            saveChats();
+            renderChatHistory();
+
+            inputEl.focus();
         }
 
         function addCopyButtons(container) {
@@ -582,21 +667,35 @@ HTML_CONTENT = """
             });
         }
 
-        function attachActions(msgDiv, text) {
+        function attachActions(msgDiv, text, role, msgIndex) {
             if (msgDiv.querySelector('.msg-actions')) return;
             const actionsDiv = document.createElement("div");
             actionsDiv.className = "msg-actions";
 
-            const speakBtn = document.createElement("button");
-            speakBtn.className = "action-btn";
-            speakBtn.innerText = "🔊 Read Aloud";
-            speakBtn.onclick = () => speakText(speakBtn, text);
+            if (role === "model") {
+                const speakBtn = document.createElement("button");
+                speakBtn.className = "action-btn";
+                speakBtn.innerText = "🔊 Read Aloud";
+                speakBtn.onclick = () => speakText(speakBtn, text);
+                actionsDiv.appendChild(speakBtn);
 
-            actionsDiv.appendChild(speakBtn);
+                const regenBtn = document.createElement("button");
+                regenBtn.className = "action-btn";
+                regenBtn.innerText = "🔄 Regenerate";
+                regenBtn.onclick = () => regenerateResponse(msgIndex);
+                actionsDiv.appendChild(regenBtn);
+            } else if (role === "user") {
+                const editBtn = document.createElement("button");
+                editBtn.className = "action-btn";
+                editBtn.innerText = "✏️ Edit";
+                editBtn.onclick = () => editUserMessage(msgIndex);
+                actionsDiv.appendChild(editBtn);
+            }
+
             msgDiv.appendChild(actionsDiv);
         }
 
-        function appendMessage(role, text, file = null) {
+        function appendMessage(role, text, file = null, msgIndex = -1) {
             const chatBox = document.getElementById("chat-box");
             const msgDiv = document.createElement("div");
             msgDiv.className = `message ${role}`;
@@ -619,10 +718,12 @@ HTML_CONTENT = """
 
             chatBox.appendChild(msgDiv);
             chatBox.scrollTop = chatBox.scrollHeight;
-            if (role === "model" && text) {
-                renderMath(textSpan);
-                addCopyButtons(msgDiv);
-                attachActions(msgDiv, text);
+            if (text) {
+                if (role === "model") {
+                    renderMath(textSpan);
+                    addCopyButtons(msgDiv);
+                }
+                attachActions(msgDiv, text, role, msgIndex);
             }
             return msgDiv;
         }
