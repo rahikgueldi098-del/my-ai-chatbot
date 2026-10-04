@@ -123,11 +123,14 @@ HTML_CONTENT = """
 
         #input-container { display: flex; gap: 10px; align-items: flex-end; }
         #file-input { display: none; }
-        #attach-btn { height: 48px; width: 48px; border-radius: 24px; border: 1px solid #424242; background: #2f2f2f; color: #fff; font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
-        #attach-btn:hover { background: #383838; }
+        .icon-btn { height: 48px; width: 48px; border-radius: 24px; border: 1px solid #424242; background: #2f2f2f; color: #fff; font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; flex-shrink: 0; }
+        .icon-btn:hover { background: #383838; }
+        .icon-btn.recording { background: #3a1c1c; border-color: #ef4444; color: #ef4444; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
         #user-input { flex: 1; padding: 12px 16px; border-radius: 18px; border: 1px solid #424242; background: #2f2f2f; color: #fff; outline: none; font-size: 1rem; resize: none; max-height: 150px; min-height: 48px; line-height: 1.4; }
         #user-input:focus { border-color: #666; }
-        #send-btn { height: 48px; padding: 0 20px; border-radius: 24px; border: none; background: #fff; color: #000; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
+        #send-btn { height: 48px; padding: 0 20px; border-radius: 24px; border: none; background: #fff; color: #000; font-weight: 600; cursor: pointer; transition: opacity 0.2s; flex-shrink: 0; }
         #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     </style>
 </head>
@@ -167,7 +170,8 @@ HTML_CONTENT = """
             </div>
             <div id="input-container">
                 <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
-                <button id="attach-btn" onclick="document.getElementById('file-input').click()" title="Joindre un fichier">📎</button>
+                <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Joindre un fichier">📎</button>
+                <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Dictée vocale">🎙️</button>
                 <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter pour ligne suivante)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
                 <button id="send-btn" onclick="sendMessage()">Send</button>
             </div>
@@ -179,6 +183,8 @@ HTML_CONTENT = """
         let chats = JSON.parse(localStorage.getItem('ai_chats') || '{}');
         let currentFile = null;
         let webSearchEnabled = true;
+        let recognition = null;
+        let isRecording = false;
 
         window.onload = () => {
             renderSidebar();
@@ -188,7 +194,66 @@ HTML_CONTENT = """
             } else {
                 startNewChat();
             }
+            initSpeechRecognition();
         };
+
+        function initSpeechRecognition() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                document.getElementById('mic-btn').style.display = 'none';
+                return;
+            }
+            recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = 'fr-FR';
+
+            recognition.onresult = (event) => {
+                let transcript = '';
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    transcript += event.results[i][0].transcript;
+                }
+                const inputEl = document.getElementById("user-input");
+                inputEl.value = transcript;
+                autoExpand(inputEl);
+            };
+
+            recognition.onerror = (event) => {
+                console.error("Speech recognition error", event.error);
+                stopRecording();
+            };
+
+            recognition.onend = () => {
+                stopRecording();
+            };
+        }
+
+        function toggleSpeechRecognition() {
+            if (!recognition) return;
+            if (isRecording) {
+                recognition.stop();
+                stopRecording();
+            } else {
+                try {
+                    recognition.start();
+                    isRecording = true;
+                    const micBtn = document.getElementById('mic-btn');
+                    micBtn.classList.add('recording');
+                    micBtn.title = 'Arrêter l\'enregistrement';
+                } catch (e) {
+                    console.error(e);
+                }
+            }
+        }
+
+        function stopRecording() {
+            isRecording = false;
+            const micBtn = document.getElementById('mic-btn');
+            if (micBtn) {
+                micBtn.classList.remove('recording');
+                micBtn.title = 'Dictée vocale';
+            }
+        }
 
         function toggleSearch() {
             webSearchEnabled = !webSearchEnabled;
@@ -330,7 +395,6 @@ HTML_CONTENT = """
                 return;
             }
 
-            // Strip markdown formatting for cleaner speech
             const cleanText = text.replace(/[*_#`$]/g, '');
             const utterance = new SpeechSynthesisUtterance(cleanText);
 
@@ -385,6 +449,10 @@ HTML_CONTENT = """
         }
 
         async function sendMessage() {
+            if (isRecording) {
+                toggleSpeechRecognition();
+            }
+
             const inputEl = document.getElementById("user-input");
             const btnEl = document.getElementById("send-btn");
             const personaEl = document.getElementById("persona-select");
@@ -585,7 +653,6 @@ def chat(request: ChatRequest):
 
     def generate_stream():
         last_error = ""
-        # Primary attempt with configured tools (Web Search)
         for model_name in models_to_try:
             try:
                 response_stream = client.models.generate_content_stream(
@@ -601,12 +668,11 @@ def chat(request: ChatRequest):
                 last_error = str(model_err)
                 continue
 
-        # Fallback attempt if Web Search hits 429 quota limits
         if "429" in last_error and request.enable_search:
             yield "*(Web search rate limit reached — generating direct response...)*\n\n"
             fallback_config = types.GenerateContentConfig(
                 system_instruction=request.system_instruction,
-                tools=[]  # Disable tools for direct fallback
+                tools=[]
             )
             for model_name in models_to_try:
                 try:
