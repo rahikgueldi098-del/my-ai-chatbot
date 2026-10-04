@@ -19,6 +19,7 @@ app = FastAPI(title="ChatGPT Clone")
 class FileData(BaseModel):
     mime_type: str
     data_base64: str
+    name: Optional[str] = "file"
 
 
 class ChatMessage(BaseModel):
@@ -92,6 +93,9 @@ HTML_CONTENT = """
         .model { align-self: flex-start; background-color: #212121; color: #ececec; border-bottom-left-radius: 2px; border: 1px solid #333; width: 100%; }
 
         .message img { max-width: 100%; border-radius: 8px; margin-top: 8px; }
+        .doc-badge { display: inline-flex; align-items: center; gap: 8px; background: #1e293b; border: 1px solid #334155; padding: 8px 12px; border-radius: 8px; margin-bottom: 6px; font-size: 0.88rem; color: #38bdf8; word-break: break-all; }
+        .doc-icon { font-size: 1.1rem; }
+
         .message p { margin-bottom: 8px; }
         .message p:last-child { margin-bottom: 0; }
         .message ul, .message ol { margin-left: 20px; margin-bottom: 8px; }
@@ -118,7 +122,8 @@ HTML_CONTENT = """
         /* Input Area & Attachment Preview */
         #input-wrapper { padding: 20px; max-width: 800px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
         #file-preview { display: none; align-items: center; gap: 10px; background: #2f2f2f; padding: 8px 12px; border-radius: 8px; border: 1px solid #424242; width: fit-content; font-size: 0.85rem; }
-        #file-preview img { height: 40px; width: 40px; object-fit: cover; border-radius: 4px; }
+        #preview-img { height: 40px; width: 40px; object-fit: cover; border-radius: 4px; display: none; }
+        #preview-icon { font-size: 1.5rem; display: none; }
         #remove-file-btn { background: transparent; border: none; color: #ff5555; cursor: pointer; font-size: 1rem; margin-left: 6px; }
 
         #input-container { display: flex; gap: 10px; align-items: flex-end; }
@@ -167,12 +172,13 @@ HTML_CONTENT = """
         <div id="input-wrapper">
             <div id="file-preview">
                 <img id="preview-img" src="" alt="preview">
+                <span id="preview-icon">📄</span>
                 <span id="file-name"></span>
                 <button id="remove-file-btn" onclick="clearFile()">✕</button>
             </div>
             <div id="input-container">
-                <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
-                <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Joindre un fichier">📎</button>
+                <input type="file" id="file-input" accept="image/*,.pdf,.txt,.csv,.md,.json,.py,.js,.html,.css" onchange="handleFileSelect(event)">
+                <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Joindre un fichier (Image, PDF, TXT, CSV...)">📎</button>
                 <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Dictée vocale">🎙</button>
                 <textarea id="user-input" placeholder="Message AI Assistant... (Shift + Enter pour ligne suivante)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
                 <button id="send-btn" onclick="handleSendOrStop()">Send</button>
@@ -430,6 +436,14 @@ HTML_CONTENT = """
             window.speechSynthesis.speak(utterance);
         }
 
+        function getFileIcon(mimeType, filename) {
+            if (mimeType.startsWith('image/')) return '📷';
+            if (mimeType === 'application/pdf' || filename.endsWith('.pdf')) return '📕';
+            if (mimeType.includes('csv') || filename.endsWith('.csv')) return '📊';
+            if (mimeType.includes('json') || filename.endsWith('.json')) return '📦';
+            return '📄';
+        }
+
         function handleFileSelect(event) {
             const file = event.target.files[0];
             if (!file) return;
@@ -437,12 +451,33 @@ HTML_CONTENT = """
             const reader = new FileReader();
             reader.onload = (e) => {
                 const base64Data = e.target.result.split(',')[1];
+                let mimeType = file.type || 'text/plain';
+
+                // Fallback mime types based on extension
+                if (file.name.endsWith('.csv')) mimeType = 'text/csv';
+                else if (file.name.endsWith('.pdf')) mimeType = 'application/pdf';
+                else if (file.name.endsWith('.md')) mimeType = 'text/markdown';
+                else if (file.name.endsWith('.py') || file.name.endsWith('.js') || file.name.endsWith('.html') || file.name.endsWith('.css')) mimeType = 'text/plain';
+
                 currentFile = {
-                    mime_type: file.type,
-                    data_base64: base64Data
+                    mime_type: mimeType,
+                    data_base64: base64Data,
+                    name: file.name
                 };
 
-                document.getElementById("preview-img").src = e.target.result;
+                const previewImg = document.getElementById("preview-img");
+                const previewIcon = document.getElementById("preview-icon");
+
+                if (mimeType.startsWith('image/')) {
+                    previewImg.src = e.target.result;
+                    previewImg.style.display = "block";
+                    previewIcon.style.display = "none";
+                } else {
+                    previewImg.style.display = "none";
+                    previewIcon.innerText = getFileIcon(mimeType, file.name);
+                    previewIcon.style.display = "block";
+                }
+
                 document.getElementById("file-name").innerText = file.name;
                 document.getElementById("file-preview").style.display = "flex";
             };
@@ -513,7 +548,7 @@ HTML_CONTENT = """
             const currentHistory = chats[currentChatId].history;
 
             if (currentHistory.length === 0) {
-                const titleText = text || "Image envoyée";
+                const titleText = text || (activeFile ? activeFile.name : "Fichier envoyé");
                 chats[currentChatId].title = titleText.length > 25 ? titleText.substring(0, 25) + "..." : titleText;
                 renderSidebar();
             }
@@ -696,9 +731,17 @@ HTML_CONTENT = """
             msgDiv.className = `message ${role}`;
 
             if (file) {
-                const img = document.createElement("img");
-                img.src = `data:${file.mime_type};base64,${file.data_base64}`;
-                msgDiv.appendChild(img);
+                if (file.mime_type.startsWith('image/')) {
+                    const img = document.createElement("img");
+                    img.src = `data:${file.mime_type};base64,${file.data_base64}`;
+                    msgDiv.appendChild(img);
+                } else {
+                    const badge = document.createElement("div");
+                    badge.className = "doc-badge";
+                    const icon = getFileIcon(file.mime_type, file.name || "");
+                    badge.innerHTML = `<span class="doc-icon">${icon}</span> <span>${file.name || "Attachment"}</span>`;
+                    msgDiv.appendChild(badge);
+                }
             }
 
             const textSpan = document.createElement("div");
@@ -782,7 +825,6 @@ def chat(request: ChatRequest):
                 if chunk.text:
                     yield chunk.text
         except Exception as err:
-            # Fallback automatic without web search if search rate limit (429) hit
             if request.enable_search:
                 fallback_config = types.GenerateContentConfig(
                     system_instruction=request.system_instruction,
