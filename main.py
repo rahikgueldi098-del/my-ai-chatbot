@@ -47,6 +47,11 @@ HTML_CONTENT = """
     <!-- Highlight.js for Code Syntax Highlighting -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <!-- KaTeX for Math Equations -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         body { background-color: #212121; color: #ececec; display: flex; height: 100vh; overflow: hidden; }
@@ -97,6 +102,13 @@ HTML_CONTENT = """
         .message pre code { background: transparent; padding: 0; }
         .copy-btn { position: absolute; top: 8px; right: 8px; background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; font-size: 0.75rem; cursor: pointer; transition: 0.2s; }
         .copy-btn:hover { background: #30363d; color: #fff; }
+
+        /* Typing Dots Animation */
+        .typing-dots { display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; }
+        .typing-dot { width: 6px; height: 6px; background: #aaa; border-radius: 50%; animation: blink 1.4s infinite ease-in-out both; }
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes blink { 0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
 
         /* Input Area & Attachment Preview */
         #input-wrapper { padding: 20px; max-width: 800px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
@@ -240,6 +252,20 @@ HTML_CONTENT = """
             });
         }
 
+        function renderMath(element) {
+            if (window.renderMathInElement) {
+                renderMathInElement(element, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '$', right: '$', display: false},
+                        {left: '\\\\(', right: '\\\\)', display: false},
+                        {left: '\\\\[', right: '\\\\]', display: true}
+                    ],
+                    throwOnError: false
+                });
+            }
+        }
+
         function loadChat(id) {
             currentChatId = id;
             renderSidebar();
@@ -359,6 +385,8 @@ HTML_CONTENT = """
             btnEl.disabled = true;
 
             const botMessageEl = appendMessage("model", "", null);
+            botMessageEl.querySelector('.text-content').innerHTML = '<div class="typing-dots"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
+
             let accumulatedText = "";
 
             try {
@@ -375,7 +403,7 @@ HTML_CONTENT = """
                 });
 
                 if (!response.ok) {
-                    botMessageEl.innerText = "Erreur de communication avec le serveur.";
+                    botMessageEl.querySelector('.text-content').innerText = "Erreur de communication avec le serveur.";
                     return;
                 }
 
@@ -389,11 +417,12 @@ HTML_CONTENT = """
                     const chunk = decoder.decode(value, { stream: true });
                     accumulatedText += chunk;
 
-                    botMessageEl.innerHTML = marked.parse(accumulatedText);
+                    botMessageEl.querySelector('.text-content').innerHTML = marked.parse(accumulatedText);
                     document.getElementById("chat-box").scrollTop = document.getElementById("chat-box").scrollHeight;
                 }
 
                 hljs.highlightAll();
+                renderMath(botMessageEl.querySelector('.text-content'));
                 addCopyButtons(botMessageEl);
 
                 currentHistory.push({ role: "user", content: text, file: activeFile });
@@ -401,7 +430,7 @@ HTML_CONTENT = """
                 saveChats();
 
             } catch (err) {
-                botMessageEl.innerText = "Erreur de connexion au serveur.";
+                botMessageEl.querySelector('.text-content').innerText = "Erreur de connexion au serveur.";
             } finally {
                 inputEl.disabled = false;
                 btnEl.disabled = false;
@@ -442,19 +471,22 @@ HTML_CONTENT = """
                 msgDiv.appendChild(img);
             }
 
+            const textSpan = document.createElement("div");
+            textSpan.className = "text-content";
+
             if (role === "user") {
-                const textSpan = document.createElement("div");
                 textSpan.innerText = text;
-                msgDiv.appendChild(textSpan);
             } else {
-                const textSpan = document.createElement("div");
                 textSpan.innerHTML = text ? marked.parse(text) : "...";
-                msgDiv.appendChild(textSpan);
             }
+            msgDiv.appendChild(textSpan);
 
             chatBox.appendChild(msgDiv);
             chatBox.scrollTop = chatBox.scrollHeight;
-            if (role === "model" && text) addCopyButtons(msgDiv);
+            if (role === "model" && text) {
+                renderMath(textSpan);
+                addCopyButtons(msgDiv);
+            }
             return msgDiv;
         }
     </script>
