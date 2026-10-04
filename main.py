@@ -353,16 +353,24 @@ HTML_CONTENT = """
                 const chat = chats[id];
                 const title = chat.title || "Discussion";
 
-                // Match query against chat title or prompt content
                 const matchesTitle = title.toLowerCase().includes(searchQuery);
-                const matchesHistory = chat.history?.some(m => m.content?.toLowerCase().includes(searchQuery));
+                const matchedMsg = chat.history?.find(m => m.content?.toLowerCase().includes(searchQuery));
 
-                if (searchQuery && !matchesTitle && !matchesHistory) {
-                    return; // Skip non-matching chats
+                if (searchQuery && !matchesTitle && !matchedMsg) {
+                    return; // Hide non-matching chats
                 }
 
                 const item = document.createElement("div");
                 item.className = `history-item ${id === currentChatId ? 'active' : ''}`;
+                item.style.flexDirection = "column";
+                item.style.alignItems = "flex-start";
+
+                // Header container (Title + Action buttons)
+                const headerDiv = document.createElement("div");
+                headerDiv.style.display = "flex";
+                headerDiv.style.justifyContent = "space-between";
+                headerDiv.style.alignItems = "center";
+                headerDiv.style.width = "100%";
 
                 const titleSpan = document.createElement("span");
                 titleSpan.className = "history-title";
@@ -387,8 +395,28 @@ HTML_CONTENT = """
                 actionsDiv.appendChild(renameBtn);
                 actionsDiv.appendChild(delBtn);
 
-                item.appendChild(titleSpan);
-                item.appendChild(actionsDiv);
+                headerDiv.appendChild(titleSpan);
+                headerDiv.appendChild(actionsDiv);
+                item.appendChild(headerDiv);
+
+                // Show snippet preview if search matched inside message content instead of title
+                if (searchQuery && matchedMsg && !matchesTitle) {
+                    const snippetSpan = document.createElement("span");
+                    snippetSpan.style.fontSize = "0.75rem";
+                    snippetSpan.style.color = "#888";
+                    snippetSpan.style.marginTop = "2px";
+                    snippetSpan.style.whiteSpace = "nowrap";
+                    snippetSpan.style.overflow = "hidden";
+                    snippetSpan.style.textOverflow = "ellipsis";
+                    snippetSpan.style.maxWidth = "100%";
+
+                    const idx = matchedMsg.content.toLowerCase().indexOf(searchQuery);
+                    const start = Math.max(0, idx - 10);
+                    const snippet = matchedMsg.content.substring(start, idx + searchQuery.length + 20);
+                    snippetSpan.innerText = `💬 "...${snippet}..."`;
+                    item.appendChild(snippetSpan);
+                }
+
                 item.onclick = () => loadChat(id);
                 listEl.appendChild(item);
             });
