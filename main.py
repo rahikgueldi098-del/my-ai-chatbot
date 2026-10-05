@@ -32,7 +32,7 @@ class ChatRequest(BaseModel):
     file: Optional[FileData] = None
     history: Optional[List[ChatMessage]] = []
     enable_search: Optional[bool] = True
-    model_name: Optional[str] = "gemini-3.8-flash"
+    model_name: Optional[str] = "gemini-2.5-flash"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -67,24 +67,40 @@ def chat(request: ChatRequest):
         tools=tools
     )
 
-    selected_model = request.model_name or "gemini-3.8-flash"
+    primary_model = request.model_name or "gemini-2.5-flash"
+    fallback_model = "gemini-2.5-flash"
 
     def generate_stream():
+        # Step 1: Try Primary Selected Model
         try:
             response_stream = client.models.generate_content_stream(
-                model=selected_model,
+                model=primary_model,
                 contents=contents,
                 config=config
             )
             for chunk in response_stream:
                 if chunk.text:
                     yield chunk.text
-        except Exception as err:
-            err_str = str(err)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                yield "⚠️ **Quota Exceeded**: Your Google API key has reached its free tier rate limit.\n\n*Please switch back to **Gemini 3.8 Flash** or attach billing in your Google AI Studio account to continue using Pro.*"
+            return
+        except Exception as primary_err:
+            err_str = str(primary_err)
+            # Step 2: Auto Fallback to Flash if Pro Quota is Exhausted
+            if primary_model != fallback_model and ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str):
+                try:
+                    yield "*(Pro quota reached. Automatically switching to Gemini Flash...)*\n\n"
+                    fallback_stream = client.models.generate_content_stream(
+                        model=fallback_model,
+                        contents=contents,
+                        config=config
+                    )
+                    for chunk in fallback_stream:
+                        if chunk.text:
+                            yield chunk.text
+                    return
+                except Exception as fallback_err:
+                    yield f"⚠️ **API Quota Exceeded**: Both Pro and Flash quotas are currently exhausted for this API key. Please try again in a few minutes or check billing in Google AI Studio.\n\n`{str(fallback_err)}`"
             else:
-                yield f"⚠️ **Service Error**: {err_str}"
+                yield f"⚠️ **API Error**: {err_str}"
 
     return StreamingResponse(generate_stream(), media_type="text/plain")
 
@@ -187,8 +203,8 @@ HTML_CONTENT = """<!DOCTYPE html>
             <div class="header-title">✨ AI Assistant Workspace</div>
             <div class="header-controls">
                 <select id="model-select">
-                    <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Fast)</option>
-                    <option value="gemini-3.1-pro-preview">🧠 Gemini 3.1 Pro (Reasoning)</option>
+                    <option value="gemini-2.5-flash">⚡ Gemini 2.5 Flash (Fast)</option>
+                    <option value="gemini-2.5-pro">🧠 Gemini 2.5 Pro (Reasoning)</option>
                 </select>
                 <button id="search-toggle" class="toggle-btn active" onclick="toggleSearch()">🌐 Web Search: ON</button>
                 <select id="persona-select">
@@ -210,7 +226,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <div id="input-container">
             <input type="file" id="file-input" style="display:none;" onchange="handleFileSelect(event)">
             <button class="icon-btn" onclick="document.getElementById('file-input').click()" title="Attach File">📎</button>
-            <button class="icon-btn" id="mic-btn" onclick="toggleSpeechToText()" title="Voice Input">🎙️</button>
+            <button class="icon-btn" id="mic-btn" onclick="toggleSpeechToText()" title="Voice Input">🎙️️</button>
             <textarea id="message-input" placeholder="Type a message or command..." onkeydown="handleKeyDown(event)"></textarea>
             <button class="send-btn" onclick="sendMessage()">Send</button>
         </div>
