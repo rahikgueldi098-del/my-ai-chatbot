@@ -32,7 +32,7 @@ class ChatRequest(BaseModel):
     file: Optional[FileData] = None
     history: Optional[List[ChatMessage]] = []
     enable_search: Optional[bool] = True
-    model_name: Optional[str] = "gemini-2.5-flash"
+    model_name: Optional[str] = "gemini-3.8-flash"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -67,7 +67,7 @@ def chat(request: ChatRequest):
         tools=tools
     )
 
-    selected_model = request.model_name or "gemini-2.5-flash"
+    selected_model = request.model_name or "gemini-3.8-flash"
 
     def generate_stream():
         try:
@@ -201,8 +201,8 @@ HTML_CONTENT = """<!DOCTYPE html>
             <div class="header-title">✨ AI Assistant Workspace</div>
             <div class="header-controls">
                 <select id="model-select">
-                    <option value="gemini-2.5-flash">⚡ Gemini 2.5 Flash (Fast)</option>
-                    <option value="gemini-2.5-pro">🧠 Gemini 2.5 Pro (Reasoning)</option>
+                    <option value="gemini-3.8-flash">⚡ Gemini 3.8 Flash (Fast)</option>
+                    <option value="gemini-3.1-pro-preview">🧠 Gemini 3.1 Pro (Reasoning)</option>
                 </select>
                 <button id="search-toggle" class="toggle-btn active" onclick="toggleSearch()">🌐 Web Search: ON</button>
                 <select id="persona-select">
@@ -420,7 +420,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                 removeFile();
                 saveToStorage();
                 renderSidebar();
-                renderMessages(); // Final render for syntax highlighting
+                renderMessages();
             } catch (err) {
                 targetBubble.innerText = "Error streaming response. Please try again.";
             }
