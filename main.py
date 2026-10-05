@@ -81,39 +81,10 @@ def chat(request: ChatRequest):
                     yield chunk.text
         except Exception as err:
             err_str = str(err)
-            # Automatic fallback to Flash if Pro free tier limit (429) is hit
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                yield "*(Pro model quota reached. Automatically switching to Gemini 3.8 Flash...)*\n\n"
-                try:
-                    fallback_stream = client.models.generate_content_stream(
-                        model="gemini-3.8-flash",
-                        contents=contents,
-                        config=config
-                    )
-                    for chunk in fallback_stream:
-                        if chunk.text:
-                            yield chunk.text
-                except Exception as fb_err:
-                    yield f"API Error: {str(fb_err)}"
-            elif request.enable_search:
-                # Fallback retry without search tool if search tool fails
-                fallback_config = types.GenerateContentConfig(
-                    system_instruction=request.system_instruction,
-                    tools=[]
-                )
-                try:
-                    fallback_stream = client.models.generate_content_stream(
-                        model=selected_model,
-                        contents=contents,
-                        config=fallback_config
-                    )
-                    for chunk in fallback_stream:
-                        if chunk.text:
-                            yield chunk.text
-                except Exception as fb_err:
-                    yield f"API Error: {str(fb_err)}"
+                yield "⚠️ **Quota Exceeded**: Your Google API key has reached its free tier rate limit.\n\n*Please switch back to **Gemini 3.8 Flash** or attach billing in your Google AI Studio account to continue using Pro.*"
             else:
-                yield f"API Error: {err_str}"
+                yield f"⚠️ **Service Error**: {err_str}"
 
     return StreamingResponse(generate_stream(), media_type="text/plain")
 
