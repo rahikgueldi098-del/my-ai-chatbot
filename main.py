@@ -835,7 +835,6 @@ def chat(request: ChatRequest):
     def generate_stream():
         last_error = ""
 
-        # Loop through candidate models if high demand occurs
         for model_name in CANDIDATE_MODELS:
             try:
                 config = types.GenerateContentConfig(
@@ -852,19 +851,16 @@ def chat(request: ChatRequest):
 
             except Exception as err:
                 last_error = str(err)
-                # Retry attempt without web search tool if search triggered high load
                 if request.enable_search:
                     try:
                         fallback_config = types.GenerateContentConfig(
                             system_instruction=request.system_instruction,
                             tools=[],
                         )
-                        fallback_stream = (
-                            client.models.generate_content_stream(
-                                model=model_name,
-                                contents=contents,
-                                config=fallback_config,
-                            )
+                        fallback_stream = client.models.generate_content_stream(
+                            model=model_name,
+                            contents=contents,
+                            config=fallback_config,
                         )
                         for chunk in fallback_stream:
                             if chunk.text:
@@ -872,7 +868,15 @@ def chat(request: ChatRequest):
                         return
                     except Exception:
                         pass
-                continue  # Try next candidate model
+                continue
+
+        # Format user-friendly error messages based on the API error type
+        if "429" in last_error or "RESOURCE_EXHAUSTED" in last_error:
+            yield "⚠️ **Rate Limit Reached**: The AI is receiving too many requests right now. Please wait 1 to 2 minutes and try again."
+        elif "503" in last_error or "UNAVAILABLE" in last_error:
+            yield "⚠️ **High Demand**: Google's AI servers are currently busy. Please retry in a few seconds."
+        else:
+            yield "⚠️ **Service Temporarily Unavailable**: Unable to connect to the AI model. Please try again shortly."
 
         yield f"Service temporairement indisponible (503). Veuillez réessayer. Détails: {last_error}"
 
