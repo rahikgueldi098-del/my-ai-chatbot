@@ -32,7 +32,6 @@ app = FastAPI(title="Gemini AI Studio")
 
 CANDIDATE_MODELS = [
     "gemini-3.8-flash",
-    "gemini-2.5-flash",
 ]
 
 
