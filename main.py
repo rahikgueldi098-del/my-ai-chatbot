@@ -873,11 +873,12 @@ def chat(request: ChatRequest):
         # Format user-friendly error messages based on the API error type
         if "429" in last_error or "RESOURCE_EXHAUSTED" in last_error:
             yield "⚠️ **Rate Limit Reached**: The AI is receiving too many requests right now. Please wait 1 to 2 minutes and try again."
+            return
         elif "503" in last_error or "UNAVAILABLE" in last_error:
             yield "⚠️ **High Demand**: Google's AI servers are currently busy. Please retry in a few seconds."
+            return
         else:
             yield "⚠️ **Service Temporarily Unavailable**: Unable to connect to the AI model. Please try again shortly."
-
-        yield f"Service temporairement indisponible (503). Veuillez réessayer. Détails: {last_error}"
+            return
 
     return StreamingResponse(generate_stream(), media_type="text/plain")
