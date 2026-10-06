@@ -14,7 +14,7 @@ except ImportError:
 
     SDK_MODE = "LEGACY"
 
-MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
 app = FastAPI(title="AI Assistant Studio Pro")
 
