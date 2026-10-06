@@ -18,13 +18,11 @@ except ImportError:
 
   SDK_MODE = "LEGACY"
 
-# Gemini 3.8 Flash model
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
 app = FastAPI(title="AI Assistant Studio Pro")
 
 
-# --- REQUEST MODELS ---
 class EnhanceRequest(BaseModel):
   prompt: str = ""
 
@@ -37,7 +35,6 @@ class ChatRequest(BaseModel):
   web_search: bool = True
 
 
-# --- SECURITY & ANALYTICS ---
 RATE_LIMIT_WINDOW_SEC = 60
 MAX_REQUESTS_PER_WINDOW = 30
 ip_request_history = collections.defaultdict(list)
@@ -132,7 +129,7 @@ def decode_file(file_payload):
   return file_bytes, mime, name
 
 
-HTML_CONTENT = """<!DOCTYPE html>
+HTML_CONTENT = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -209,7 +206,6 @@ HTML_CONTENT = """<!DOCTYPE html>
     .error-box { color: #f87171; background: #450a0a; padding: 10px 14px; border-radius: 8px; border: 1px solid #991b1b; font-size: 0.9rem; }
     #sidebar-backdrop { display: none; }
 
-    /* Analytics Modal */
     .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; padding: 20px; }
     .modal-overlay.open { display: flex; }
     .modal-content { background: #171717; border: 1px solid #333; border-radius: 12px; max-width: 700px; width: 100%; max-height: 85vh; overflow-y: auto; padding: 20px; color: #ececec; display: flex; flex-direction: column; gap: 16px; }
@@ -363,7 +359,6 @@ HTML_CONTENT = """<!DOCTYPE html>
     let isStreaming = false;
     let activeAbortController = null;
 
-    // Defensive LocalStorage Sanitizer
     function initStorage() {
       try {
         let raw = JSON.parse(localStorage.getItem('ai_chats'));
@@ -865,7 +860,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       } catch (e) {}
     }
 
-    // Initialize layout after DOM loads
     window.addEventListener('DOMContentLoaded', initStorage);
   </script>
 </body>
@@ -1086,7 +1080,7 @@ def chat_endpoint(body: ChatRequest, request: Request):
                   " exceeded its limit. Turn OFF Web Search or update your key."
               )
             else:
-              yield f"\n\n⚠️️ Error: {err_msg}"
+              yield f"\n\n⚠ Error: {err_msg}"
             break
 
       return StreamingResponse(
