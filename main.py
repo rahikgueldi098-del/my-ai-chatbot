@@ -3,7 +3,7 @@ import base64
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 
-# Flexible SDK Loader for maximum compatibility
+
 try:
     from google import genai
     from google.genai import types
@@ -14,7 +14,7 @@ except ImportError:
 
     SDK_MODE = "LEGACY"
 
-MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 app = FastAPI(title="AI Assistant Studio Pro")
 
