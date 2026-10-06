@@ -1,23 +1,22 @@
 import os
-import io
-import base64
 import json
+import base64
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
-from google import genai
-from google.genai import types
+
+# Flexible SDK Loader for maximum compatibility
+try:
+    from google import genai
+    from google.genai import types
+
+    SDK_MODE = "NEW"
+except ImportError:
+    import google.generativeai as genai_legacy
+
+    SDK_MODE = "LEGACY"
 
 app = FastAPI(title="AI Assistant Studio Pro")
-
-
-def get_client():
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500,
-                            detail="GEMINI_API_KEY environment variable is missing in server environment.")
-    return genai.Client(api_key=api_key)
-
 
 HTML_CONTENT = """<!DOCTYPE html>
 <html lang="en">
@@ -28,8 +27,6 @@ HTML_CONTENT = """<!DOCTYPE html>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background-color: #212121; color: #ececec; display: flex; height: 100vh; overflow: hidden; }
@@ -90,7 +87,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     #user-input { flex: 1; padding: 12px 16px; border-radius: 18px; border: 1px solid #424242; background: #2f2f2f; color: #fff; outline: none; font-size: 1rem; resize: none; max-height: 150px; min-height: 48px; line-height: 1.4; }
     #send-btn { height: 48px; min-width: 70px; padding: 0 20px; border-radius: 24px; border: none; background: #fff; color: #000; font-weight: 600; cursor: pointer; flex-shrink: 0; }
     #send-btn.stop-btn { background: #ef4444; color: #fff; }
-    .error-text { color: #f87171; font-weight: bold; background: #450a0a; padding: 8px 12px; border-radius: 6px; border: 1px solid #991b1b; }
+    .error-box { color: #f87171; background: #450a0a; padding: 10px 14px; border-radius: 8px; border: 1px solid #991b1b; font-size: 0.9rem; }
   </style>
 </head>
 <body>
@@ -145,6 +142,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
     </div>
   </div>
+
   <script>
     let chats = JSON.parse(localStorage.getItem('ai_chats') || '[]');
     let currentChatId = localStorage.getItem('ai_current_chat_id') || null;
@@ -155,9 +153,9 @@ HTML_CONTENT = """<!DOCTYPE html>
     let isStreaming = false;
     let activeAbortController = null;
 
-    function safeMarkdownParse(str) {
-      if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
-        try { return marked.parse(str); } catch (e) { return escapeHtml(str); }
+    function safeParseMarkdown(str) {
+      if (window.marked && typeof window.marked.parse === 'function') {
+        try { return window.marked.parse(str); } catch (e) {}
       }
       return escapeHtml(str).replace(/\\n/g, '<br>');
     }
@@ -219,6 +217,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       const list = document.getElementById('history-list');
       const searchInput = document.getElementById('chat-search');
       const search = searchInput ? searchInput.value.toLowerCase() : '';
+      if (!list) return;
       list.innerHTML = '';
       chats.forEach(chat => {
         if (search && !chat.title.toLowerCase().includes(search)) return;
@@ -240,6 +239,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function renderChatBox() {
       const box = document.getElementById('chat-box');
+      if (!box) return;
       box.innerHTML = '';
       const chat = getCurrentChat();
       if (!chat) return;
@@ -253,6 +253,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       const box = document.getElementById('chat-box');
       const msgDiv = document.createElement('div');
       msgDiv.className = `message ${role}`;
+
       if (fileObj) {
         if (fileObj.type && fileObj.type.startsWith('image/')) {
           const img = document.createElement('img');
@@ -261,21 +262,23 @@ HTML_CONTENT = """<!DOCTYPE html>
         } else {
           const badge = document.createElement('div');
           badge.className = 'doc-badge';
-          badge.innerHTML = `📄 <strong>${escapeHtml(fileObj.name)}</strong> (${(fileObj.size/1024).toFixed(1)} KB)`;
+          badge.innerHTML = `📄 <strong>${escapeHtml(fileObj.name)}</strong>`;
           msgDiv.appendChild(badge);
         }
       }
+
       const contentDiv = document.createElement('div');
       contentDiv.className = 'text-content';
       if (role === 'model') {
-        contentDiv.innerHTML = text ? safeMarkdownParse(text) : '<div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>';
+        contentDiv.innerHTML = text ? safeParseMarkdown(text) : '<div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>';
       } else {
         contentDiv.innerText = text;
       }
       msgDiv.appendChild(contentDiv);
+
       if (text && role === 'model') {
-        const wordCount = text.trim().split(/\\s+/).filter(Boolean).length;
-        const readTime = Math.max(1, Math.ceil(wordCount / 200));
+        const words = text.trim().split(/\\s+/).filter(Boolean).length;
+        const readTime = Math.max(1, Math.ceil(words / 200));
         const metaSpan = document.createElement('div');
         metaSpan.className = 'msg-actions';
         const copyBtn = document.createElement('button');
@@ -288,23 +291,14 @@ HTML_CONTENT = """<!DOCTYPE html>
         };
         const metaInfo = document.createElement('span');
         metaInfo.className = 'msg-meta';
-        metaInfo.innerText = `${wordCount} words • ~${readTime} min read`;
+        metaInfo.innerText = `${words} words • ~${readTime} min read`;
         metaSpan.appendChild(copyBtn);
         metaSpan.appendChild(metaInfo);
         msgDiv.appendChild(metaSpan);
       }
+
       box.appendChild(msgDiv);
       box.scrollTop = box.scrollHeight;
-      if (typeof renderMathInElement === 'function') {
-        try {
-          renderMathInElement(msgDiv, {
-            delimiters: [
-              {left: '$$', right: '$$', display: true},
-              {left: '$', right: '$', display: false}
-            ]
-          });
-        } catch(e) {}
-      }
       return msgDiv;
     }
 
@@ -387,7 +381,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       const micBtn = document.getElementById('mic-btn');
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SpeechRecognition) {
-        alert("Speech Recognition is not supported in this browser. Try Chrome or Edge.");
+        alert("Speech Recognition is not supported in this browser.");
         return;
       }
       if (isRecording) {
@@ -399,24 +393,15 @@ HTML_CONTENT = """<!DOCTYPE html>
         recognition.continuous = false;
         recognition.interimResults = false;
         recognition.lang = 'en-US';
-        recognition.onstart = () => {
-          isRecording = true;
-          micBtn.classList.add('recording');
-        };
-        recognition.onresult = (event) => {
-          const transcript = event.results[0][0].transcript;
+        recognition.onstart = () => { isRecording = true; micBtn.classList.add('recording'); };
+        recognition.onresult = (e) => {
+          const transcript = e.results[0][0].transcript;
           const input = document.getElementById('user-input');
           input.value = input.value ? input.value + ' ' + transcript : transcript;
           autoExpand(input);
         };
-        recognition.onerror = () => {
-          isRecording = false;
-          micBtn.classList.remove('recording');
-        };
-        recognition.onend = () => {
-          isRecording = false;
-          micBtn.classList.remove('recording');
-        };
+        recognition.onerror = () => { isRecording = false; micBtn.classList.remove('recording'); };
+        recognition.onend = () => { isRecording = false; micBtn.classList.remove('recording'); };
         recognition.start();
       } catch (err) {
         isRecording = false;
@@ -427,13 +412,9 @@ HTML_CONTENT = """<!DOCTYPE html>
     async function enhanceCurrentPrompt() {
       const input = document.getElementById('user-input');
       const text = input.value.trim();
-      if (!text) {
-        alert("Please enter a prompt draft first!");
-        return;
-      }
+      if (!text) { alert("Please enter a prompt first!"); return; }
       const enhanceBtn = document.getElementById('enhance-btn');
       enhanceBtn.innerText = '⏳';
-      enhanceBtn.disabled = true;
       try {
         const res = await fetch('/api/enhance-prompt', {
           method: 'POST',
@@ -444,69 +425,63 @@ HTML_CONTENT = """<!DOCTYPE html>
         if (data.enhanced_prompt) {
           input.value = data.enhanced_prompt;
           autoExpand(input);
-        } else if (data.error) {
-          alert("Enhance failed: " + data.error);
         }
-      } catch (err) {
-        alert("Error connecting to server: " + err.message);
+      } catch (e) {
+        alert("Enhance failed: " + e.message);
       } finally {
         enhanceBtn.innerText = '🪄';
-        enhanceBtn.disabled = false;
       }
     }
 
     function handleSendOrStop() {
-      try {
-        if (isStreaming) {
-          if (activeAbortController) activeAbortController.abort();
-          isStreaming = false;
-          setSendButtonState(false);
-        } else {
-          sendMessage();
-        }
-      } catch (err) {
-        alert("Action Error: " + err.message);
+      if (isStreaming) {
+        if (activeAbortController) activeAbortController.abort();
+        isStreaming = false;
+        updateSendBtnUI(false);
+      } else {
+        sendMessage();
       }
     }
 
-    function setSendButtonState(streaming) {
-      const sendBtn = document.getElementById('send-btn');
-      if (sendBtn) {
-        if (streaming) {
-          sendBtn.innerText = 'Stop ⏹';
-          sendBtn.classList.add('stop-btn');
-        } else {
-          sendBtn.innerText = 'Send';
-          sendBtn.classList.remove('stop-btn');
-        }
+    function updateSendBtnUI(streaming) {
+      const btn = document.getElementById('send-btn');
+      if (!btn) return;
+      if (streaming) {
+        btn.innerText = 'Stop ⏹';
+        btn.classList.add('stop-btn');
+      } else {
+        btn.innerText = 'Send';
+        btn.classList.remove('stop-btn');
       }
     }
 
     async function sendMessage() {
       const input = document.getElementById('user-input');
       const text = input ? input.value.trim() : '';
-      if (!text && !selectedFile) {
-        alert("Please enter a message or upload a file first.");
-        return;
-      }
+      if (!text && !selectedFile) return;
+
       const chat = getCurrentChat();
       if (!chat) return;
+
       if (chat.history.length === 0) {
         chat.title = text ? (text.slice(0, 30) + (text.length > 30 ? '...' : '')) : (selectedFile ? selectedFile.name : 'New Discussion');
         renderSidebar();
       }
-      const userMsg = { role: 'user', content: text, file: selectedFile };
-      chat.history.push(userMsg);
-      appendMessageUI('user', text, selectedFile);
+
+      const filePayload = selectedFile;
+      chat.history.push({ role: 'user', content: text, file: filePayload });
+      appendMessageUI('user', text, filePayload);
+
       if (input) {
         input.value = '';
         input.style.height = 'auto';
       }
-      const filePayload = selectedFile;
       clearFile();
+
       isStreaming = true;
-      setSendButtonState(true);
+      updateSendBtnUI(true);
       activeAbortController = new AbortController();
+
       const botMsgDiv = appendMessageUI('model', '', null);
       const contentDiv = botMsgDiv.querySelector('.text-content');
       const systemPrompt = document.getElementById('persona-select').value;
@@ -526,61 +501,53 @@ HTML_CONTENT = """<!DOCTYPE html>
         });
 
         if (!res.ok) {
-          const errData = await res.json().catch(() => ({ detail: "HTTP " + res.status }));
-          contentDiv.innerHTML = `<div class="error-text">Server Error: ${escapeHtml(errData.detail || 'Request failed')}</div>`;
+          const err = await res.json().catch(() => ({ detail: "HTTP " + res.status }));
+          contentDiv.innerHTML = `<div class="error-box">Server Error: ${escapeHtml(err.detail || 'Failed')}</div>`;
           return;
         }
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
-        let accText = '';
+        let fullText = '';
+
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          accText += decoder.decode(value, { stream: true });
-          contentDiv.innerHTML = safeMarkdownParse(accText);
+          fullText += decoder.decode(value, { stream: true });
+          contentDiv.innerHTML = safeParseMarkdown(fullText);
           const box = document.getElementById('chat-box');
           box.scrollTop = box.scrollHeight;
         }
-        chat.history.push({ role: 'model', content: accText });
+
+        chat.history.push({ role: 'model', content: fullText });
         saveChats();
-        renderChatBox();
       } catch (err) {
         if (err.name !== 'AbortError') {
-          contentDiv.innerHTML = `<div class="error-text">Client/Network Error: ${escapeHtml(err.message)}</div>`;
+          contentDiv.innerHTML = `<div class="error-box">Error: ${escapeHtml(err.message)}</div>`;
         }
       } finally {
         isStreaming = false;
         activeAbortController = null;
-        setSendButtonState(false);
+        updateSendBtnUI(false);
       }
     }
 
     function exportChat(format) {
       const chat = getCurrentChat();
-      if (!chat || chat.history.length === 0) {
-        alert("No conversation history to export!");
-        return;
-      }
+      if (!chat || chat.history.length === 0) return alert("Nothing to export!");
       let dataStr = '';
-      let fileName = `${chat.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_export`;
+      let filename = `chat_${Date.now()}.${format}`;
       if (format === 'json') {
         dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(chat, null, 2));
-        fileName += '.json';
       } else {
         let md = `# ${chat.title}\n\n`;
-        chat.history.forEach(m => {
-          md += `### ${m.role.toUpperCase()}\n${m.content}\n\n---\n\n`;
-        });
+        chat.history.forEach(m => md += `### ${m.role.toUpperCase()}\n${m.content}\n\n`);
         dataStr = "data:text/markdown;charset=utf-8," + encodeURIComponent(md);
-        fileName += '.md';
       }
-      const dl = document.createElement('a');
-      dl.setAttribute('href', dataStr);
-      dl.setAttribute('download', fileName);
-      document.body.appendChild(dl);
-      dl.click();
-      dl.remove();
+      const a = document.createElement('a');
+      a.href = dataStr;
+      a.download = filename;
+      a.click();
     }
   </script>
 </body>
@@ -596,25 +563,29 @@ async def serve_gui():
 async def enhance_prompt(request: Request):
     try:
         body = await request.json()
-        raw_prompt = body.get("prompt", "")
-        if not raw_prompt.strip():
-            return JSONResponse({"enhanced_prompt": raw_prompt})
+        raw_prompt = body.get("prompt", "").strip()
+        if not raw_prompt:
+            return JSONResponse({"enhanced_prompt": ""})
 
-        client = get_client()
-        system_instruction = (
-            "You are an expert prompt engineer. Rewrite the prompt into a clear, detailed prompt. "
-            "Output ONLY the improved prompt text itself—no explanations."
-        )
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="GEMINI_API_KEY missing")
 
-        response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=f"Improve this prompt: {raw_prompt}",
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.7,
+        sys_inst = "Improve this user prompt into a clear, structured prompt. Output ONLY the improved text."
+
+        if SDK_MODE == "NEW":
+            client = genai.Client(api_key=api_key)
+            res = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=f"Enhance: {raw_prompt}",
+                config=types.GenerateContentConfig(system_instruction=sys_inst)
             )
-        )
-        return JSONResponse({"enhanced_prompt": response.text.strip()})
+            return JSONResponse({"enhanced_prompt": res.text.strip()})
+        else:
+            genai_legacy.configure(api_key=api_key)
+            model = genai_legacy.GenerativeModel("gemini-1.5-flash", system_instruction=sys_inst)
+            res = model.generate_content(f"Enhance: {raw_prompt}")
+            return JSONResponse({"enhanced_prompt": res.text.strip()})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -623,65 +594,83 @@ async def enhance_prompt(request: Request):
 async def chat_endpoint(request: Request):
     try:
         body = await request.json()
-        history = body.get("history", [])
         message = body.get("message", "")
         file_payload = body.get("file")
+        system_instruction = body.get("system_instruction", "You are a helpful assistant.")
         web_search = body.get("web_search", True)
-        system_instruction = body.get("system_instruction", "You are a helpful AI assistant.")
 
-        client = get_client()
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500,
+                                detail="GEMINI_API_KEY environment variable is not configured in Vercel.")
 
-        formatted_contents = []
-        for msg in history:
-            role = "user" if msg["role"] == "user" else "model"
+        if SDK_MODE == "NEW":
+            client = genai.Client(api_key=api_key)
             parts = []
-            if msg.get("content"):
-                parts.append(types.Part.from_text(text=msg["content"]))
-            if parts:
-                formatted_contents.append(types.Content(role=role, parts=parts))
+            if message:
+                parts.append(types.Part.from_text(text=message))
 
-        current_parts = []
-        if message:
-            current_parts.append(types.Part.from_text(text=message))
+            if file_payload and "data" in file_payload:
+                _, b64 = file_payload["data"].split(",", 1)
+                file_bytes = base64.b64decode(b64)
+                mime = file_payload.get("type", "application/octet-stream")
+                if mime.startswith("image/"):
+                    parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime))
+                else:
+                    try:
+                        text_str = file_bytes.decode("utf-8")
+                        parts.append(
+                            types.Part.from_text(text=f"\n[Attached file: {file_payload.get('name')}]\n{text_str}"))
+                    except Exception:
+                        pass
 
-        if file_payload and "data" in file_payload:
-            header, base64_data = file_payload["data"].split(",", 1)
-            file_bytes = base64.b64decode(base64_data)
-            mime_type = file_payload.get("type", "application/octet-stream")
-            if mime_type.startswith("image/"):
-                current_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
-            else:
+            tools = [{"google_search": {}}] if web_search else None
+            config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                tools=tools
+            )
+
+            async def generate_stream():
                 try:
-                    text_content = file_bytes.decode("utf-8")
-                    doc_prompt = f"\n\n[Attached File: {file_payload.get('name')}]\n{text_content}"
-                    current_parts.append(types.Part.from_text(text=doc_prompt))
-                except Exception:
-                    current_parts.append(types.Part.from_bytes(data=file_bytes, mime_type="application/octet-stream"))
+                    response = client.models.generate_content_stream(
+                        model="gemini-2.0-flash",
+                        contents=parts,
+                        config=config
+                    )
+                    for chunk in response:
+                        if chunk.text:
+                            yield chunk.text
+                except Exception as ex:
+                    yield f"\n[Backend Execution Error: {str(ex)}]"
 
-        formatted_contents.append(types.Content(role="user", parts=current_parts))
+            return StreamingResponse(generate_stream(), media_type="text/plain")
 
-        tools = [{"google_search": {}}] if web_search else None
+        else:
+            genai_legacy.configure(api_key=api_key)
+            model_name = "gemini-1.5-flash"
+            model = genai_legacy.GenerativeModel(model_name, system_instruction=system_instruction)
 
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            tools=tools,
-            temperature=0.7,
-        )
+            prompt_content = [message] if message else []
+            if file_payload and "data" in file_payload:
+                _, b64 = file_payload["data"].split(",", 1)
+                file_bytes = base64.b64decode(b64)
+                mime = file_payload.get("type", "application/octet-stream")
+                if mime.startswith("image/"):
+                    prompt_content.append({"mime_type": mime, "data": file_bytes})
+                else:
+                    try:
+                        text_str = file_bytes.decode("utf-8")
+                        prompt_content.append(f"\n[Attached file: {file_payload.get('name')}]\n{text_str}")
+                    except Exception:
+                        pass
 
-        async def generate_stream():
-            try:
-                async_stream = await client.aio.models.generate_content_stream(
-                    model="gemini-2.5-flash",
-                    contents=formatted_contents,
-                    config=config
-                )
-                async for chunk in async_stream:
+            def generate_legacy():
+                res = model.generate_content(prompt_content, stream=True)
+                for chunk in res:
                     if chunk.text:
                         yield chunk.text
-            except Exception as err:
-                yield f"\n[Backend Error: {str(err)}]"
 
-        return StreamingResponse(generate_stream(), media_type="text/plain")
+            return StreamingResponse(generate_legacy(), media_type="text/plain")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
