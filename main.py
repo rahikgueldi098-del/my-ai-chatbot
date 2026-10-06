@@ -14,7 +14,7 @@ except ImportError:
 
     SDK_MODE = "LEGACY"
 
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
 app = FastAPI(title="AI Assistant Studio Pro")
 
@@ -91,8 +91,6 @@ HTML_CONTENT = """<!DOCTYPE html>
     #send-btn { height: 48px; min-width: 70px; padding: 0 20px; border-radius: 24px; border: none; background: #fff; color: #000; font-weight: 600; cursor: pointer; flex-shrink: 0; }
     #send-btn.stop-btn { background: #ef4444; color: #fff; }
     .error-box { color: #f87171; background: #450a0a; padding: 10px 14px; border-radius: 8px; border: 1px solid #991b1b; font-size: 0.9rem; }
-
-    /* ---------- Mobile / small screens ---------- */
     #sidebar-backdrop { display: none; }
     @media (max-width: 768px) {
       #menu-btn { display: inline-block; }
@@ -167,12 +165,26 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
     </div>
   </div>
-
   <script>
     let chats = [];
-    try { chats = JSON.parse(localStorage.getItem('ai_chats') || '[]'); } catch (e) { chats = []; }
+    try {
+      let raw = JSON.parse(localStorage.getItem('ai_chats'));
+      if (Array.isArray(raw)) {
+        chats = raw;
+      } else if (raw && typeof raw === 'object') {
+        chats = Object.keys(raw).map(id => ({
+          id: id,
+          title: raw[id].title || 'New Discussion',
+          history: raw[id].history || []
+        }));
+      } else {
+        chats = [];
+      }
+    } catch (e) { chats = []; }
+
     let currentChatId = null;
     try { currentChatId = localStorage.getItem('ai_current_chat_id') || null; } catch (e) {}
+
     let webSearchEnabled = true;
     let selectedFile = null;
     let recognition = null;
@@ -202,7 +214,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       document.getElementById('sidebar-backdrop').classList.remove('show');
     }
 
-    if (chats.length === 0) {
+    if (!Array.isArray(chats) || chats.length === 0) {
       startNewChat();
     } else {
       if (!currentChatId || !chats.find(c => c.id === currentChatId)) {
@@ -215,18 +227,18 @@ HTML_CONTENT = """<!DOCTYPE html>
       try {
         localStorage.setItem('ai_chats', JSON.stringify(chats));
         localStorage.setItem('ai_current_chat_id', currentChatId);
-      } catch (e) {
-        // Storage full (large attached files) or blocked: keep working in memory
-      }
+      } catch (e) {}
     }
 
     function getCurrentChat() {
+      if (!Array.isArray(chats)) chats = [];
       return chats.find(c => c.id === currentChatId);
     }
 
     function startNewChat() {
       const newId = 'chat_' + Date.now();
       const newChat = { id: newId, title: 'New Discussion', history: [] };
+      if (!Array.isArray(chats)) chats = [];
       chats.unshift(newChat);
       currentChatId = newId;
       saveChats();
@@ -262,6 +274,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       const search = searchInput ? searchInput.value.toLowerCase() : '';
       if (!list) return;
       list.innerHTML = '';
+      if (!Array.isArray(chats)) chats = [];
       chats.forEach(chat => {
         if (search && !chat.title.toLowerCase().includes(search)) return;
         const item = document.createElement('div');
@@ -296,7 +309,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       const box = document.getElementById('chat-box');
       const msgDiv = document.createElement('div');
       msgDiv.className = `message ${role}`;
-
       if (fileObj) {
         if (fileObj.type && fileObj.type.startsWith('image/')) {
           const img = document.createElement('img');
@@ -309,7 +321,6 @@ HTML_CONTENT = """<!DOCTYPE html>
           msgDiv.appendChild(badge);
         }
       }
-
       const contentDiv = document.createElement('div');
       contentDiv.className = 'text-content';
       if (role === 'model') {
@@ -318,11 +329,9 @@ HTML_CONTENT = """<!DOCTYPE html>
         contentDiv.innerText = text;
       }
       msgDiv.appendChild(contentDiv);
-
       if (text && role === 'model') {
         addMessageActions(msgDiv, text);
       }
-
       box.appendChild(msgDiv);
       box.scrollTop = box.scrollHeight;
       return msgDiv;
@@ -504,7 +513,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
     }
 
-    // Only send plain text history to the backend (files can be huge)
     function buildHistoryForApi(chat) {
       return chat.history
         .slice(0, -1)
@@ -517,8 +525,11 @@ HTML_CONTENT = """<!DOCTYPE html>
       const text = input ? input.value.trim() : '';
       if (!text && !selectedFile) return;
 
-      const chat = getCurrentChat();
-      if (!chat) return;
+      let chat = getCurrentChat();
+      if (!chat) {
+        startNewChat();
+        chat = getCurrentChat();
+      }
 
       if (chat.history.length === 0) {
         chat.title = text ? (text.slice(0, 30) + (text.length > 30 ? '...' : '')) : (selectedFile ? selectedFile.name : 'New Discussion');
@@ -660,7 +671,6 @@ async def enhance_prompt(request: Request):
 
 
 def decode_file(file_payload):
-    """Return (bytes, mime, name) from the base64 data URL sent by the browser."""
     _, b64 = file_payload["data"].split(",", 1)
     file_bytes = base64.b64decode(b64)
     mime = file_payload.get("type", "application/octet-stream")
@@ -682,13 +692,11 @@ async def chat_endpoint(request: Request):
         if not api_key:
             raise HTTPException(
                 status_code=500,
-                detail="GEMINI_API_KEY environment variable is not configured in Vercel."
+                detail="GEMINI_API_KEY environment variable is not configured."
             )
 
         if SDK_MODE == "NEW":
             client = genai.Client(api_key=api_key)
-
-            # Previous turns (text only) so the model remembers the conversation
             contents = []
             for m in history:
                 text = (m.get("content") or "").strip()
@@ -699,11 +707,9 @@ async def chat_endpoint(request: Request):
                     types.Content(role=role, parts=[types.Part.from_text(text=text)])
                 )
 
-            # Current user turn
             parts = []
             if message:
                 parts.append(types.Part.from_text(text=message))
-
             if file_payload and "data" in file_payload:
                 file_bytes, mime, name = decode_file(file_payload)
                 if mime.startswith("image/") or mime == "application/pdf":
@@ -721,15 +727,12 @@ async def chat_endpoint(request: Request):
                 raise HTTPException(status_code=400, detail="Empty message.")
 
             contents.append(types.Content(role="user", parts=parts))
-
             tools = [types.Tool(google_search=types.GoogleSearch())] if web_search else None
             config = types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 tools=tools
             )
 
-            # Plain (sync) generator: Starlette runs it in a thread pool,
-            # so the blocking Gemini stream does not freeze the server.
             def generate_stream():
                 try:
                     response = client.models.generate_content_stream(
@@ -748,11 +751,9 @@ async def chat_endpoint(request: Request):
                 media_type="text/plain",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
             )
-
         else:
             genai_legacy.configure(api_key=api_key)
             model = genai_legacy.GenerativeModel(MODEL_NAME, system_instruction=system_instruction)
-
             legacy_history = []
             for m in history:
                 text = (m.get("content") or "").strip()
@@ -792,7 +793,6 @@ async def chat_endpoint(request: Request):
                 media_type="text/plain",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
             )
-
     except HTTPException:
         raise
     except Exception as e:
