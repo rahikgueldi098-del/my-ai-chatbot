@@ -12,12 +12,10 @@ app = FastAPI(title="AI Assistant Studio Pro")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-
 def get_client():
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is missing.")
     return genai.Client(api_key=GEMINI_API_KEY)
-
 
 HTML_CONTENT = """<!DOCTYPE html>
 <html lang="en">
@@ -106,7 +104,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
     </div>
   </div>
-
   <div id="main-container">
     <header>
       <span>AI Assistant Studio Pro</span>
@@ -121,9 +118,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         </select>
       </div>
     </header>
-
     <div id="chat-box"></div>
-
     <div id="input-wrapper">
       <div class="chips-row">
         <button class="chip" onclick="applyChip('Summarize this context clearly:')">📝 Summarize</button>
@@ -132,14 +127,12 @@ HTML_CONTENT = """<!DOCTYPE html>
         <button class="chip" onclick="applyChip('Translate the following text to English:')">🌐 Translate</button>
         <button class="chip" onclick="applyChip('Explain this concept in simple terms suitable for a beginner:')">🔍 Explain Simply</button>
       </div>
-
       <div id="file-preview">
         <img id="preview-img" src="" alt="preview">
         <span id="preview-icon"></span>
         <span id="file-name"></span>
         <button id="remove-file-btn" onclick="clearFile()">✕</button>
       </div>
-
       <div id="input-container">
         <input type="file" id="file-input" accept="image/*,.pdf,.txt,.csv,.md,.json,.py,.js,.html,.css" onchange="handleFileSelect(event)">
         <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Attach File">📎</button>
@@ -150,7 +143,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
     </div>
   </div>
-
   <script>
     let chats = JSON.parse(localStorage.getItem('ai_chats') || '[]');
     let currentChatId = localStorage.getItem('ai_current_chat_id') || null;
@@ -160,7 +152,6 @@ HTML_CONTENT = """<!DOCTYPE html>
     let isRecording = false;
     let isStreaming = false;
     let activeAbortController = null;
-
     if (chats.length === 0) {
       startNewChat();
     } else {
@@ -169,16 +160,13 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
       loadChat(currentChatId);
     }
-
     function saveChats() {
       localStorage.setItem('ai_chats', JSON.stringify(chats));
       localStorage.setItem('ai_current_chat_id', currentChatId);
     }
-
     function getCurrentChat() {
       return chats.find(c => c.id === currentChatId);
     }
-
     function startNewChat() {
       const newId = 'chat_' + Date.now();
       const newChat = { id: newId, title: 'New Discussion', history: [] };
@@ -188,14 +176,12 @@ HTML_CONTENT = """<!DOCTYPE html>
       renderSidebar();
       renderChatBox();
     }
-
     function loadChat(id) {
       currentChatId = id;
       saveChats();
       renderSidebar();
       renderChatBox();
     }
-
     function deleteChat(id, event) {
       if (event) event.stopPropagation();
       chats = chats.filter(c => c.id !== id);
@@ -208,51 +194,41 @@ HTML_CONTENT = """<!DOCTYPE html>
         renderChatBox();
       }
     }
-
     function renderSidebar() {
       const list = document.getElementById('history-list');
       const search = document.getElementById('chat-search').value.toLowerCase();
       list.innerHTML = '';
-
       chats.forEach(chat => {
         if (search && !chat.title.toLowerCase().includes(search)) return;
-
         const item = document.createElement('div');
         item.className = 'history-item' + (chat.id === currentChatId ? ' active' : '');
         item.onclick = () => loadChat(chat.id);
-
         const title = document.createElement('span');
         title.className = 'history-title';
         title.innerText = chat.title || 'New Discussion';
-
         const delBtn = document.createElement('button');
         delBtn.className = 'item-action-btn';
         delBtn.innerText = '🗑️';
         delBtn.onclick = (e) => deleteChat(chat.id, e);
-
         item.appendChild(title);
         item.appendChild(delBtn);
         list.appendChild(item);
       });
     }
-
     function renderChatBox() {
       const box = document.getElementById('chat-box');
       box.innerHTML = '';
       const chat = getCurrentChat();
       if (!chat) return;
-
       chat.history.forEach((msg) => {
         appendMessageUI(msg.role, msg.content, msg.file);
       });
       box.scrollTop = box.scrollHeight;
     }
-
     function appendMessageUI(role, text, fileObj) {
       const box = document.getElementById('chat-box');
       const msgDiv = document.createElement('div');
       msgDiv.className = `message ${role}`;
-
       if (fileObj) {
         if (fileObj.type && fileObj.type.startsWith('image/')) {
           const img = document.createElement('img');
@@ -265,24 +241,19 @@ HTML_CONTENT = """<!DOCTYPE html>
           msgDiv.appendChild(badge);
         }
       }
-
       const contentDiv = document.createElement('div');
       contentDiv.className = 'text-content';
-
       if (role === 'model') {
         contentDiv.innerHTML = text ? marked.parse(text) : '<div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>';
       } else {
         contentDiv.innerText = text;
       }
       msgDiv.appendChild(contentDiv);
-
       if (text && role === 'model') {
         const wordCount = text.trim().split(/\\s+/).filter(Boolean).length;
         const readTime = Math.max(1, Math.ceil(wordCount / 200));
-
         const metaSpan = document.createElement('div');
         metaSpan.className = 'msg-actions';
-
         const copyBtn = document.createElement('button');
         copyBtn.className = 'action-btn';
         copyBtn.innerText = '📋 Copy';
@@ -291,19 +262,15 @@ HTML_CONTENT = """<!DOCTYPE html>
           copyBtn.innerText = '✅ Copied';
           setTimeout(() => copyBtn.innerText = '📋 Copy', 2000);
         };
-
         const metaInfo = document.createElement('span');
         metaInfo.className = 'msg-meta';
         metaInfo.innerText = `${wordCount} words • ~${readTime} min read`;
-
         metaSpan.appendChild(copyBtn);
         metaSpan.appendChild(metaInfo);
         msgDiv.appendChild(metaSpan);
       }
-
       box.appendChild(msgDiv);
       box.scrollTop = box.scrollHeight;
-
       if (window.renderMathInElement) {
         renderMathInElement(msgDiv, {
           delimiters: [
@@ -312,17 +279,14 @@ HTML_CONTENT = """<!DOCTYPE html>
           ]
         });
       }
-
       return msgDiv;
     }
-
     function toggleSearch() {
       webSearchEnabled = !webSearchEnabled;
       const btn = document.getElementById('search-toggle');
       btn.innerText = webSearchEnabled ? "Web Search: ON" : "Web Search: OFF";
       btn.className = webSearchEnabled ? "toggle-btn active" : "toggle-btn";
     }
-
     function applyChip(prefix) {
       const input = document.getElementById('user-input');
       if (input.value.trim()) {
@@ -333,14 +297,12 @@ HTML_CONTENT = """<!DOCTYPE html>
       input.focus();
       autoExpand(input);
     }
-
     function handlePersonaChange(select) {
       if (select.value === '__NEW__') {
         const name = prompt("Enter Custom Persona Name (e.g. Code Reviewer):");
         if (!name) { select.selectedIndex = 0; return; }
         const promptText = prompt("Enter Persona System Instructions:");
         if (!promptText) { select.selectedIndex = 0; return; }
-
         const opt = document.createElement('option');
         opt.value = promptText;
         opt.innerText = name;
@@ -348,23 +310,19 @@ HTML_CONTENT = """<!DOCTYPE html>
         select.value = promptText;
       }
     }
-
     function autoExpand(textarea) {
       textarea.style.height = 'auto';
       textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
     }
-
     function handleKeyDown(event) {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         handleSendOrStop();
       }
     }
-
     function handleFileSelect(e) {
       const file = e.target.files[0];
       if (!file) return;
-
       const reader = new FileReader();
       reader.onload = function(evt) {
         selectedFile = {
@@ -373,12 +331,10 @@ HTML_CONTENT = """<!DOCTYPE html>
           size: file.size,
           data: evt.target.result
         };
-
         const preview = document.getElementById('file-preview');
         const previewImg = document.getElementById('preview-img');
         const previewIcon = document.getElementById('preview-icon');
         const fileName = document.getElementById('file-name');
-
         if (file.type && file.type.startsWith('image/')) {
           previewImg.src = evt.target.result;
           previewImg.style.display = 'block';
@@ -392,56 +348,46 @@ HTML_CONTENT = """<!DOCTYPE html>
       };
       reader.readAsDataURL(file);
     }
-
     function clearFile() {
       selectedFile = null;
       document.getElementById('file-input').value = '';
       document.getElementById('file-preview').style.display = 'none';
     }
-
     function toggleSpeechRecognition() {
       const micBtn = document.getElementById('mic-btn');
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
       if (!SpeechRecognition) {
         alert("Speech Recognition is not supported in this browser. Try Chrome or Edge.");
         return;
       }
-
       if (isRecording) {
         if (recognition) recognition.stop();
         return;
       }
-
       try {
         recognition = new SpeechRecognition();
         recognition.continuous = false;
         recognition.interimResults = false;
         recognition.lang = 'en-US';
-
         recognition.onstart = () => {
           isRecording = true;
           micBtn.classList.add('recording');
         };
-
         recognition.onresult = (event) => {
           const transcript = event.results[0][0].transcript;
           const input = document.getElementById('user-input');
           input.value = input.value ? input.value + ' ' + transcript : transcript;
           autoExpand(input);
         };
-
         recognition.onerror = (event) => {
           console.error("Speech error:", event.error);
           isRecording = false;
           micBtn.classList.remove('recording');
         };
-
         recognition.onend = () => {
           isRecording = false;
           micBtn.classList.remove('recording');
         };
-
         recognition.start();
       } catch (err) {
         console.error(err);
@@ -449,7 +395,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         micBtn.classList.remove('recording');
       }
     }
-
     async function enhanceCurrentPrompt() {
       const input = document.getElementById('user-input');
       const text = input.value.trim();
@@ -457,12 +402,10 @@ HTML_CONTENT = """<!DOCTYPE html>
         alert("Please enter a prompt draft first!");
         return;
       }
-
       const enhanceBtn = document.getElementById('enhance-btn');
       const originalText = enhanceBtn.innerText;
       enhanceBtn.innerText = '⏳';
       enhanceBtn.disabled = true;
-
       try {
         const res = await fetch('/api/enhance-prompt', {
           method: 'POST',
@@ -483,7 +426,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         enhanceBtn.disabled = false;
       }
     }
-
     function handleSendOrStop() {
       if (isStreaming) {
         if (activeAbortController) activeAbortController.abort();
@@ -493,7 +435,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         sendMessage();
       }
     }
-
     function setSendButtonState(streaming) {
       const sendBtn = document.getElementById('send-btn');
       if (streaming) {
@@ -504,39 +445,29 @@ HTML_CONTENT = """<!DOCTYPE html>
         sendBtn.classList.remove('stop-btn');
       }
     }
-
     async function sendMessage() {
       const input = document.getElementById('user-input');
       const text = input.value.trim();
       if (!text && !selectedFile) return;
-
       const chat = getCurrentChat();
       if (!chat) return;
-
       if (chat.history.length === 0) {
         chat.title = text ? (text.slice(0, 30) + (text.length > 30 ? '...' : '')) : (selectedFile ? selectedFile.name : 'New Discussion');
         renderSidebar();
       }
-
       const userMsg = { role: 'user', content: text, file: selectedFile };
       chat.history.push(userMsg);
-
       appendMessageUI('user', text, selectedFile);
-
       input.value = '';
       input.style.height = 'auto';
       const filePayload = selectedFile;
       clearFile();
-
       isStreaming = true;
       setSendButtonState(true);
       activeAbortController = new AbortController();
-
       const botMsgDiv = appendMessageUI('model', '', null);
       const contentDiv = botMsgDiv.querySelector('.text-content');
-
       const systemPrompt = document.getElementById('persona-select').value;
-
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
@@ -550,16 +481,13 @@ HTML_CONTENT = """<!DOCTYPE html>
             system_instruction: systemPrompt
           })
         });
-
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.detail || "Server HTTP " + res.status);
         }
-
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let accText = '';
-
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -568,32 +496,26 @@ HTML_CONTENT = """<!DOCTYPE html>
           const box = document.getElementById('chat-box');
           box.scrollTop = box.scrollHeight;
         }
-
         chat.history.push({ role: 'model', content: accText });
         saveChats();
         renderChatBox();
-
       } catch (err) {
         if (err.name !== 'AbortError') {
           contentDiv.innerText = "Error: " + err.message;
         }
-      } finally {
-        isStreaming = false;
+      } finally {        isStreaming = false;
         activeAbortController = null;
         setSendButtonState(false);
       }
     }
-
     function exportChat(format) {
       const chat = getCurrentChat();
       if (!chat || chat.history.length === 0) {
         alert("No conversation history to export!");
         return;
       }
-
       let dataStr = '';
       let fileName = `${chat.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_export`;
-
       if (format === 'json') {
         dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(chat, null, 2));
         fileName += '.json';
@@ -605,7 +527,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         dataStr = "data:text/markdown;charset=utf-8," + encodeURIComponent(md);
         fileName += '.md';
       }
-
       const dl = document.createElement('a');
       dl.setAttribute('href', dataStr);
       dl.setAttribute('download', fileName);
@@ -615,14 +536,11 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
   </script>
 </body>
-</html>
-"""
-
+</html>"""
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_gui():
     return HTML_CONTENT
-
 
 @app.post("/api/enhance-prompt")
 async def enhance_prompt(request: Request):
@@ -638,6 +556,7 @@ async def enhance_prompt(request: Request):
             "Rewrite it into a detailed, high-quality, clear, and effective prompt for an LLM. "
             "Output ONLY the improved prompt text itself—no greetings, no explanations, no quotes."
         )
+
         response = client.models.generate_content(
             model="gemini-3.8-flash",
             contents=f"Improve this prompt: {raw_prompt}",
@@ -649,7 +568,6 @@ async def enhance_prompt(request: Request):
         return JSONResponse({"enhanced_prompt": response.text.strip()})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 @app.post("/api/chat")
 async def chat_endpoint(request: Request):
@@ -680,7 +598,6 @@ async def chat_endpoint(request: Request):
             header, base64_data = file_payload["data"].split(",", 1)
             file_bytes = base64.b64decode(base64_data)
             mime_type = file_payload.get("type", "application/octet-stream")
-
             if mime_type.startswith("image/"):
                 current_parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
             else:
@@ -693,17 +610,17 @@ async def chat_endpoint(request: Request):
 
         formatted_contents.append(types.Content(role="user", parts=current_parts))
 
-        tools = [{"google_search": {}}] if web_search else []
+        tools = [{"google_search": {}}] if web_search else None
 
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
-            tools=tools if tools else None,
+            tools=tools,
             temperature=0.7,
         )
 
         async def generate_stream():
             try:
-                response = client.mode|ls.generate_content_stream(
+                response = client.models.generate_content_stream(
                     model="gemini-3.8-flash",
                     contents=formatted_contents,
                     config=config
