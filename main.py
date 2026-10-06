@@ -5,14 +5,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 try:
-  from google import genai
-  from google.genai import types
+    from google import genai
+    from google.genai import types
 
-  SDK_MODE = "NEW"
+    SDK_MODE = "NEW"
 except ImportError:
-  import google.generativeai as genai_legacy
+    import google.generativeai as genai_legacy
 
-  SDK_MODE = "LEGACY"
+    SDK_MODE = "LEGACY"
 
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
@@ -592,9 +592,11 @@ HTML_CONTENT = """<!DOCTYPE html>
 </body>
 </html>"""
 
+
 @app.get("/", response_class=HTMLResponse)
 async def serve_gui():
     return HTML_CONTENT
+
 
 @app.post("/api/enhance-prompt")
 async def enhance_prompt(request: Request):
@@ -626,12 +628,14 @@ async def enhance_prompt(request: Request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+
 def decode_file(file_payload):
     _, b64 = file_payload["data"].split(",", 1)
     file_bytes = base64.b64decode(b64)
     mime = file_payload.get("type", "application/octet-stream")
     name = file_payload.get("name", "file")
     return file_bytes, mime, name
+
 
 @app.post("/api/chat")
 async def chat_endpoint(request: Request):
@@ -690,6 +694,7 @@ async def chat_endpoint(request: Request):
 
             def generate_stream():
                 max_retries = 3
+                backoff = 2
                 for attempt in range(max_retries):
                     try:
                         response = client.models.generate_content_stream(
@@ -700,12 +705,19 @@ async def chat_endpoint(request: Request):
                         for chunk in response:
                             if chunk.text:
                                 yield chunk.text
-                        break  # Successful stream finish, exit retry loop
+                        break
                     except Exception as ex:
-                        if "503" in str(ex) and attempt < max_retries - 1:
-                            time.sleep(2)  # Wait 2s and retry
+                        err_msg = str(ex)
+                        if (
+                                "429" in err_msg or "503" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) and attempt < max_retries - 1:
+                            time.sleep(backoff)
+                            backoff *= 2
                             continue
-                        yield f"\n\n⚠️ Error: {str(ex)}"
+
+                        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                            yield f"\n\n⚠️ **API Quota Exceeded (429):** Your Gemini API Key has exceeded its limit or daily quota. Please check your usage or billing plan."
+                        else:
+                            yield f"\n\n⚠️ Error: {err_msg}"
                         break
 
             return StreamingResponse(
@@ -743,18 +755,26 @@ async def chat_endpoint(request: Request):
 
             def generate_legacy():
                 max_retries = 3
+                backoff = 2
                 for attempt in range(max_retries):
                     try:
                         res = chat_session.send_message(prompt_content, stream=True)
                         for chunk in res:
                             if chunk.text:
                                 yield chunk.text
-                        break  # Successful stream finish, exit retry loop
+                        break
                     except Exception as ex:
-                        if "503" in str(ex) and attempt < max_retries - 1:
-                            time.sleep(2)  # Wait 2s and retry
+                        err_msg = str(ex)
+                        if (
+                                "429" in err_msg or "503" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) and attempt < max_retries - 1:
+                            time.sleep(backoff)
+                            backoff *= 2
                             continue
-                        yield f"\n\n⚠️ Error: {str(ex)}"
+
+                        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                            yield f"\n\n⚠️ **API Quota Exceeded (429):** Your Gemini API Key has exceeded its limit or daily quota. Please check your usage or billing plan."
+                        else:
+                            yield f"\n\n⚠️ Error: {err_msg}"
                         break
 
             return StreamingResponse(
