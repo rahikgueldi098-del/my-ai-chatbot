@@ -639,7 +639,7 @@ async def enhance_prompt(request: Request):
             "Output ONLY the improved prompt text itself—no greetings, no explanations, no quotes."
         )
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=f"Improve this prompt: {raw_prompt}",
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -704,7 +704,7 @@ async def chat_endpoint(request: Request):
         async def generate_stream():
             try:
                 response = client.models.generate_content_stream(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.8-flash",
                     contents=formatted_contents,
                     config=config
                 )
