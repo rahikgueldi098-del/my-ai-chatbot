@@ -3,8 +3,10 @@ import collections
 import json
 import os
 import time
+from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
 try:
   from google import genai
@@ -16,16 +18,30 @@ except ImportError:
 
   SDK_MODE = "LEGACY"
 
+# Configured to Gemini 3.8 Flash
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
 app = FastAPI(title="AI Assistant Studio Pro")
+
+
+# --- REQUEST BODY MODELS ---
+class EnhanceRequest(BaseModel):
+  prompt: str = ""
+
+
+class ChatRequest(BaseModel):
+  message: str = ""
+  history: List[Dict[str, Any]] = []
+  file: Optional[Dict[str, Any]] = None
+  system_instruction: str = "You are a helpful assistant."
+  web_search: bool = True
+
 
 # --- PILLAR 7: SECURITY, RATE LIMITING & ANALYTICS DATA STRUCTURES ---
 RATE_LIMIT_WINDOW_SEC = 60
 MAX_REQUESTS_PER_WINDOW = 30
 ip_request_history = collections.defaultdict(list)
 
-# Gemini Flash pricing constants per token (USD)
 INPUT_TOKEN_COST_USD = 0.075 / 1_000_000  # $0.075 per 1M input tokens
 OUTPUT_TOKEN_COST_USD = 0.30 / 1_000_000  # $0.30 per 1M output tokens
 
@@ -38,15 +54,13 @@ analytics_store = {
     "total_completion_tokens": 0,
     "total_cost_usd": 0.0,
     "latency_ms_history": [],
-    "recent_logs": [],  # stores last 50 requests
+    "recent_logs": [],
 }
 
 
 def check_rate_limit(client_ip: str) -> bool:
-  """Sliding-window IP rate limiter."""
   now = time.time()
   timestamps = ip_request_history[client_ip]
-  # Keep timestamps within window
   valid_timestamps = [
       ts for ts in timestamps if now - ts < RATE_LIMIT_WINDOW_SEC
   ]
@@ -60,7 +74,6 @@ def check_rate_limit(client_ip: str) -> bool:
 
 
 def estimate_tokens(text: str) -> int:
-  """Fallback token estimator (~4 chars per token)."""
   if not text:
     return 0
   return max(1, len(text) // 4)
@@ -282,7 +295,6 @@ HTML_CONTENT = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- PILLAR 7: ANALYTICS MODAL -->
   <div id="analytics-modal" class="modal-overlay" onclick="if(event.target===this) closeAnalyticsModal()">
     <div class="modal-content">
       <div class="modal-header">
@@ -362,7 +374,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       if (window.marked && typeof window.marked.parse === 'function') {
         try { return window.marked.parse(str); } catch (e) {}
       }
-      return escapeHtml(str).replace(/\\n/g, '<br>');
+      return escapeHtml(str).replace(/\n/g, '<br>');
     }
     function escapeHtml(text) {
       if (!text) return '';
@@ -491,7 +503,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       return msgDiv;
     }
     function addMessageActions(msgDiv, text, metaObj) {
-      const words = text.trim().split(/\\s+/).filter(Boolean).length;
+      const words = text.trim().split(/\s+/).filter(Boolean).length;
       const readTime = Math.max(1, Math.ceil(words / 200));
       const estTokens = metaObj && metaObj.total_tokens ? metaObj.total_tokens : Math.max(1, Math.ceil(text.length / 4));
       const estCost = metaObj && metaObj.cost_usd !== undefined ? metaObj.cost_usd : (estTokens * 0.0000003);
@@ -751,8 +763,8 @@ HTML_CONTENT = """<!DOCTYPE html>
       if (format === 'json') {
         dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(chat, null, 2));
       } else {
-        let md = `# ${chat.title}\\n\\n`;
-        chat.history.forEach(m => md += `### ${m.role.toUpperCase()}\\n${m.content}\\n\\n`);
+        let md = `# ${chat.title}\n\n`;
+        chat.history.forEach(m => md += `### ${m.role.toUpperCase()}\n${m.content}\n\n`);
         dataStr = "data:text/markdown;charset=utf-8," + encodeURIComponent(md);
       }
       const a = document.createElement('a');
@@ -761,7 +773,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       a.click();
     }
 
-    /* PILLAR 7: ANALYTICS MODAL FUNCTIONS */
     function openAnalyticsModal() {
       document.getElementById('analytics-modal').classList.add('open');
       fetchAnalyticsStats();
@@ -805,13 +816,12 @@ HTML_CONTENT = """<!DOCTYPE html>
 
 
 @app.get("/", response_class=HTMLResponse)
-async def serve_gui():
+def serve_gui():
   return HTML_CONTENT
 
 
 @app.get("/api/admin/stats")
-async def get_admin_stats(request: Request):
-  """Pillar 7 Admin Endpoint: Provides cost, usage, and traffic analytics."""
+def get_admin_stats(request: Request):
   latencies = analytics_store["latency_ms_history"]
   avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
 
@@ -829,7 +839,7 @@ async def get_admin_stats(request: Request):
 
 
 @app.post("/api/enhance-prompt")
-async def enhance_prompt(request: Request):
+def enhance_prompt(body: EnhanceRequest, request: Request):
   start_time = time.time()
   client_ip = request.client.host if request.client else "127.0.0.1"
 
@@ -838,16 +848,11 @@ async def enhance_prompt(request: Request):
         "/api/enhance-prompt", 429, 0.0, 0, 0, client_ip
     )
     raise HTTPException(
-        status_code=429,
-        detail=(
-            "Too Many Requests. Rate limit exceeded (30 reqs/min). Please wait"
-            " a moment."
-        ),
+        status_code=429, detail="Too Many Requests. Rate limit exceeded."
     )
 
   try:
-    body = await request.json()
-    raw_prompt = body.get("prompt", "").strip()
+    raw_prompt = body.prompt.strip()
     if not raw_prompt:
       return JSONResponse({"enhanced_prompt": ""})
 
@@ -900,12 +905,12 @@ def decode_file(file_payload):
   return file_bytes, mime, name
 
 
+# Synchronous endpoint definition ensures FastAPI offloads execution to an unblocked threadpool
 @app.post("/api/chat")
-async def chat_endpoint(request: Request):
+def chat_endpoint(body: ChatRequest, request: Request):
   start_time = time.time()
   client_ip = request.client.host if request.client else "127.0.0.1"
 
-  # Rate limiting check
   if not check_rate_limit(client_ip):
     log_analytics_entry("/api/chat", 429, 0.0, 0, 0, client_ip)
     raise HTTPException(
@@ -917,14 +922,11 @@ async def chat_endpoint(request: Request):
     )
 
   try:
-    body = await request.json()
-    message = body.get("message", "")
-    history = body.get("history", []) or []
-    file_payload = body.get("file")
-    system_instruction = body.get(
-        "system_instruction", "You are a helpful assistant."
-    )
-    web_search = body.get("web_search", True)
+    message = body.message
+    history = body.history or []
+    file_payload = body.file
+    system_instruction = body.system_instruction or "You are a helpful assistant."
+    web_search = body.web_search
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -933,12 +935,17 @@ async def chat_endpoint(request: Request):
           detail="GEMINI_API_KEY environment variable is not configured.",
       )
 
-    # Estimate prompt tokens from context history
     prompt_tokens_est = estimate_tokens(message) + estimate_tokens(
         system_instruction
     )
     for h in history:
       prompt_tokens_est += estimate_tokens(h.get("content", ""))
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
 
     if SDK_MODE == "NEW":
       client = genai.Client(api_key=api_key)
@@ -999,7 +1006,6 @@ async def chat_endpoint(request: Request):
                 total_output_text += chunk.text
                 yield chunk.text
 
-            # Successful response logging
             comp_tokens = estimate_tokens(total_output_text)
             latency_ms = (time.time() - start_time) * 1000
             log_analytics_entry(
@@ -1029,17 +1035,14 @@ async def chat_endpoint(request: Request):
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
               yield (
                   "\n\n⚠️ **API Quota Exceeded (429):** Your Gemini API Key has"
-                  " exceeded its quota limit. Turn OFF Web Search or switch to"
-                  " a fresh key."
+                  " exceeded its limit. Turn OFF Web Search or update your key."
               )
             else:
               yield f"\n\n⚠️ Error: {err_msg}"
             break
 
       return StreamingResponse(
-          generate_stream(),
-          media_type="text/plain",
-          headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+          generate_stream(), media_type="text/event-stream", headers=headers
       )
 
     else:
@@ -1113,17 +1116,14 @@ async def chat_endpoint(request: Request):
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
               yield (
                   "\n\n⚠️ **API Quota Exceeded (429):** Your Gemini API Key has"
-                  " exceeded its quota limit. Turn OFF Web Search or switch to"
-                  " a fresh key."
+                  " exceeded its limit. Turn OFF Web Search or update your key."
               )
             else:
               yield f"\n\n⚠️ Error: {err_msg}"
             break
 
       return StreamingResponse(
-          generate_legacy(),
-          media_type="text/plain",
-          headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+          generate_legacy(), media_type="text/event-stream", headers=headers
       )
   except HTTPException:
     raise
