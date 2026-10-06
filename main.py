@@ -1,18 +1,18 @@
-import os
 import base64
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
-
+import os
+import time
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 try:
-    from google import genai
-    from google.genai import types
+  from google import genai
+  from google.genai import types
 
-    SDK_MODE = "NEW"
+  SDK_MODE = "NEW"
 except ImportError:
-    import google.generativeai as genai_legacy
+  import google.generativeai as genai_legacy
 
-    SDK_MODE = "LEGACY"
+  SDK_MODE = "LEGACY"
 
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
@@ -181,39 +181,32 @@ HTML_CONTENT = """<!DOCTYPE html>
         chats = [];
       }
     } catch (e) { chats = []; }
-
     let currentChatId = null;
     try { currentChatId = localStorage.getItem('ai_current_chat_id') || null; } catch (e) {}
-
     let webSearchEnabled = true;
     let selectedFile = null;
     let recognition = null;
     let isRecording = false;
     let isStreaming = false;
     let activeAbortController = null;
-
     function safeParseMarkdown(str) {
       if (window.marked && typeof window.marked.parse === 'function') {
         try { return window.marked.parse(str); } catch (e) {}
       }
       return escapeHtml(str).replace(/\\n/g, '<br>');
     }
-
     function escapeHtml(text) {
       if (!text) return '';
       return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
-
     function toggleSidebar() {
       document.getElementById('sidebar').classList.toggle('open');
       document.getElementById('sidebar-backdrop').classList.toggle('show');
     }
-
     function closeSidebarOnMobile() {
       document.getElementById('sidebar').classList.remove('open');
       document.getElementById('sidebar-backdrop').classList.remove('show');
     }
-
     if (!Array.isArray(chats) || chats.length === 0) {
       startNewChat();
     } else {
@@ -222,19 +215,16 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
       loadChat(currentChatId);
     }
-
     function saveChats() {
       try {
         localStorage.setItem('ai_chats', JSON.stringify(chats));
         localStorage.setItem('ai_current_chat_id', currentChatId);
       } catch (e) {}
     }
-
     function getCurrentChat() {
       if (!Array.isArray(chats)) chats = [];
       return chats.find(c => c.id === currentChatId);
     }
-
     function startNewChat() {
       const newId = 'chat_' + Date.now();
       const newChat = { id: newId, title: 'New Discussion', history: [] };
@@ -246,7 +236,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       renderChatBox();
       closeSidebarOnMobile();
     }
-
     function loadChat(id) {
       currentChatId = id;
       saveChats();
@@ -254,7 +243,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       renderChatBox();
       closeSidebarOnMobile();
     }
-
     function deleteChat(id, event) {
       if (event) event.stopPropagation();
       chats = chats.filter(c => c.id !== id);
@@ -267,7 +255,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         renderChatBox();
       }
     }
-
     function renderSidebar() {
       const list = document.getElementById('history-list');
       const searchInput = document.getElementById('chat-search');
@@ -292,7 +279,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         list.appendChild(item);
       });
     }
-
     function renderChatBox() {
       const box = document.getElementById('chat-box');
       if (!box) return;
@@ -304,7 +290,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       });
       box.scrollTop = box.scrollHeight;
     }
-
     function appendMessageUI(role, text, fileObj) {
       const box = document.getElementById('chat-box');
       const msgDiv = document.createElement('div');
@@ -336,7 +321,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       box.scrollTop = box.scrollHeight;
       return msgDiv;
     }
-
     function addMessageActions(msgDiv, text) {
       const words = text.trim().split(/\\s+/).filter(Boolean).length;
       const readTime = Math.max(1, Math.ceil(words / 200));
@@ -357,21 +341,18 @@ HTML_CONTENT = """<!DOCTYPE html>
       metaSpan.appendChild(metaInfo);
       msgDiv.appendChild(metaSpan);
     }
-
     function toggleSearch() {
       webSearchEnabled = !webSearchEnabled;
       const btn = document.getElementById('search-toggle');
       btn.innerText = webSearchEnabled ? "Web Search: ON" : "Web Search: OFF";
       btn.className = webSearchEnabled ? "toggle-btn active" : "toggle-btn";
     }
-
     function applyChip(prefix) {
       const input = document.getElementById('user-input');
       input.value = input.value.trim() ? prefix + " " + input.value : prefix + " ";
       input.focus();
       autoExpand(input);
     }
-
     function handlePersonaChange(select) {
       if (select.value === '__NEW__') {
         const name = prompt("Enter Custom Persona Name:");
@@ -385,19 +366,16 @@ HTML_CONTENT = """<!DOCTYPE html>
         select.value = promptText;
       }
     }
-
     function autoExpand(textarea) {
       textarea.style.height = 'auto';
       textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
     }
-
     function handleKeyDown(event) {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         handleSendOrStop();
       }
     }
-
     function handleFileSelect(e) {
       const file = e.target.files[0];
       if (!file) return;
@@ -426,13 +404,11 @@ HTML_CONTENT = """<!DOCTYPE html>
       };
       reader.readAsDataURL(file);
     }
-
     function clearFile() {
       selectedFile = null;
       document.getElementById('file-input').value = '';
       document.getElementById('file-preview').style.display = 'none';
     }
-
     function toggleSpeechRecognition() {
       const micBtn = document.getElementById('mic-btn');
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -464,7 +440,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         micBtn.classList.remove('recording');
       }
     }
-
     async function enhanceCurrentPrompt() {
       const input = document.getElementById('user-input');
       const text = input.value.trim();
@@ -490,7 +465,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         enhanceBtn.innerText = '🪄';
       }
     }
-
     function handleSendOrStop() {
       if (isStreaming) {
         if (activeAbortController) activeAbortController.abort();
@@ -500,7 +474,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         sendMessage();
       }
     }
-
     function updateSendBtnUI(streaming) {
       const btn = document.getElementById('send-btn');
       if (!btn) return;
@@ -512,49 +485,40 @@ HTML_CONTENT = """<!DOCTYPE html>
         btn.classList.remove('stop-btn');
       }
     }
-
     function buildHistoryForApi(chat) {
       return chat.history
         .slice(0, -1)
         .filter(m => m.content && m.content.trim())
         .map(m => ({ role: m.role, content: m.content }));
     }
-
     async function sendMessage() {
       const input = document.getElementById('user-input');
       const text = input ? input.value.trim() : '';
       if (!text && !selectedFile) return;
-
       let chat = getCurrentChat();
       if (!chat) {
         startNewChat();
         chat = getCurrentChat();
       }
-
       if (chat.history.length === 0) {
         chat.title = text ? (text.slice(0, 30) + (text.length > 30 ? '...' : '')) : (selectedFile ? selectedFile.name : 'New Discussion');
         renderSidebar();
       }
-
       const filePayload = selectedFile;
       chat.history.push({ role: 'user', content: text, file: filePayload });
       appendMessageUI('user', text, filePayload);
-
       if (input) {
         input.value = '';
         input.style.height = 'auto';
       }
       clearFile();
-
       isStreaming = true;
       updateSendBtnUI(true);
       activeAbortController = new AbortController();
-
       const botMsgDiv = appendMessageUI('model', '', null);
       const contentDiv = botMsgDiv.querySelector('.text-content');
       const systemPrompt = document.getElementById('persona-select').value;
       let fullText = '';
-
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
@@ -568,7 +532,6 @@ HTML_CONTENT = """<!DOCTYPE html>
             system_instruction: systemPrompt === '__NEW__' ? 'You are a helpful assistant.' : systemPrompt
           })
         });
-
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: "HTTP " + res.status }));
           contentDiv.innerHTML = `<div class="error-box">Server Error: ${escapeHtml(err.detail || 'Failed')}</div>`;
@@ -576,10 +539,8 @@ HTML_CONTENT = """<!DOCTYPE html>
           saveChats();
           return;
         }
-
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
-
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -588,7 +549,6 @@ HTML_CONTENT = """<!DOCTYPE html>
           const box = document.getElementById('chat-box');
           box.scrollTop = box.scrollHeight;
         }
-
         if (fullText.trim()) {
           chat.history.push({ role: 'model', content: fullText });
           addMessageActions(botMsgDiv, fullText);
@@ -611,7 +571,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         updateSendBtnUI(false);
       }
     }
-
     function exportChat(format) {
       const chat = getCurrentChat();
       if (!chat || chat.history.length === 0) return alert("Nothing to export!");
@@ -633,11 +592,9 @@ HTML_CONTENT = """<!DOCTYPE html>
 </body>
 </html>"""
 
-
 @app.get("/", response_class=HTMLResponse)
 async def serve_gui():
     return HTML_CONTENT
-
 
 @app.post("/api/enhance-prompt")
 async def enhance_prompt(request: Request):
@@ -669,14 +626,12 @@ async def enhance_prompt(request: Request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-
 def decode_file(file_payload):
     _, b64 = file_payload["data"].split(",", 1)
     file_bytes = base64.b64decode(b64)
     mime = file_payload.get("type", "application/octet-stream")
     name = file_payload.get("name", "file")
     return file_bytes, mime, name
-
 
 @app.post("/api/chat")
 async def chat_endpoint(request: Request):
@@ -734,17 +689,24 @@ async def chat_endpoint(request: Request):
             )
 
             def generate_stream():
-                try:
-                    response = client.models.generate_content_stream(
-                        model=MODEL_NAME,
-                        contents=contents,
-                        config=config
-                    )
-                    for chunk in response:
-                        if chunk.text:
-                            yield chunk.text
-                except Exception as ex:
-                    yield f"\n\n⚠️ Error: {str(ex)}"
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        response = client.models.generate_content_stream(
+                            model=MODEL_NAME,
+                            contents=contents,
+                            config=config
+                        )
+                        for chunk in response:
+                            if chunk.text:
+                                yield chunk.text
+                        break  # Successful stream finish, exit retry loop
+                    except Exception as ex:
+                        if "503" in str(ex) and attempt < max_retries - 1:
+                            time.sleep(2)  # Wait 2s and retry
+                            continue
+                        yield f"\n\n⚠️ Error: {str(ex)}"
+                        break
 
             return StreamingResponse(
                 generate_stream(),
@@ -780,13 +742,20 @@ async def chat_endpoint(request: Request):
             chat_session = model.start_chat(history=legacy_history)
 
             def generate_legacy():
-                try:
-                    res = chat_session.send_message(prompt_content, stream=True)
-                    for chunk in res:
-                        if chunk.text:
-                            yield chunk.text
-                except Exception as ex:
-                    yield f"\n\n⚠️ Error: {str(ex)}"
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        res = chat_session.send_message(prompt_content, stream=True)
+                        for chunk in res:
+                            if chunk.text:
+                                yield chunk.text
+                        break  # Successful stream finish, exit retry loop
+                    except Exception as ex:
+                        if "503" in str(ex) and attempt < max_retries - 1:
+                            time.sleep(2)  # Wait 2s and retry
+                            continue
+                        yield f"\n\n⚠️ Error: {str(ex)}"
+                        break
 
             return StreamingResponse(
                 generate_legacy(),
