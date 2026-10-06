@@ -1,7 +1,5 @@
 import os
-import json
 import base64
-from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 
@@ -16,6 +14,8 @@ except ImportError:
 
     SDK_MODE = "LEGACY"
 
+MODEL_NAME = "gemini-2.5-flash"
+
 app = FastAPI(title="AI Assistant Studio Pro")
 
 HTML_CONTENT = """<!DOCTYPE html>
@@ -29,8 +29,8 @@ HTML_CONTENT = """<!DOCTYPE html>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    body { background-color: #212121; color: #ececec; display: flex; height: 100vh; overflow: hidden; }
-    #sidebar { width: 260px; background-color: #171717; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 15px; gap: 12px; }
+    body { background-color: #212121; color: #ececec; display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
+    #sidebar { width: 260px; background-color: #171717; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 15px; gap: 12px; flex-shrink: 0; }
     #new-chat-btn { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 8px; padding: 10px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s; }
     #new-chat-btn:hover { background: #383838; }
     #chat-search { width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid #333; background: #212121; color: #fff; font-size: 0.85rem; outline: none; }
@@ -47,17 +47,20 @@ HTML_CONTENT = """<!DOCTYPE html>
     .export-buttons { display: flex; gap: 8px; }
     .export-btn { flex: 1; background: #2f2f2f; color: #ccc; border: 1px solid #424242; border-radius: 6px; padding: 6px; font-size: 0.8rem; cursor: pointer; text-align: center; }
     .export-btn:hover { background: #383838; color: #fff; }
-    #main-container { flex: 1; display: flex; flex-direction: column; height: 100vh; }
-    header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: #171717; font-weight: 600; }
+    #main-container { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+    header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: #171717; font-weight: 600; gap: 8px; }
+    .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    #menu-btn { display: none; background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 6px; padding: 6px 10px; font-size: 1rem; cursor: pointer; }
     .header-controls { display: flex; gap: 12px; align-items: center; }
     #persona-select { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 6px; padding: 6px 12px; font-size: 0.88rem; outline: none; cursor: pointer; max-width: 200px; }
-    .toggle-btn { background: #2f2f2f; color: #888; border: 1px solid #424242; border-radius: 6px; padding: 6px 12px; font-size: 0.85rem; cursor: pointer; transition: 0.2s; }
+    .toggle-btn { background: #2f2f2f; color: #888; border: 1px solid #424242; border-radius: 6px; padding: 6px 12px; font-size: 0.85rem; cursor: pointer; transition: 0.2s; white-space: nowrap; }
     .toggle-btn.active { background: #1b3a2b; color: #4ade80; border-color: #22c55e; }
     #chat-box { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 800px; width: 100%; margin: 0 auto; }
     .message { display: flex; flex-direction: column; gap: 6px; max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.95rem; line-height: 1.6; position: relative; word-break: break-word; }
     .user { align-self: flex-end; background-color: #303030; color: #fff; border-bottom-right-radius: 2px; }
     .model { align-self: flex-start; background-color: #212121; color: #ececec; border-bottom-left-radius: 2px; border: 1px solid #333; width: 100%; }
     .message img { max-width: 100%; border-radius: 8px; margin-top: 8px; }
+    .message pre { overflow-x: auto; background: #171717; padding: 10px; border-radius: 8px; }
     .doc-badge { display: inline-flex; align-items: center; gap: 8px; background: #1e293b; border: 1px solid #334155; padding: 8px 12px; border-radius: 8px; margin-bottom: 6px; font-size: 0.88rem; color: #38bdf8; }
     .message p { margin-bottom: 8px; }
     .message p:last-child { margin-bottom: 0; }
@@ -73,9 +76,9 @@ HTML_CONTENT = """<!DOCTYPE html>
     @keyframes blink { 0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
     #input-wrapper { padding: 15px 20px 20px; max-width: 800px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
     .chips-row { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
-    .chip { background: #2a2a2a; border: 1px solid #3a3a3a; color: #ccc; padding: 5px 12px; border-radius: 16px; font-size: 0.8rem; cursor: pointer; white-space: nowrap; transition: 0.2s; }
+    .chip { background: #2a2a2a; border: 1px solid #3a3a3a; color: #ccc; padding: 5px 12px; border-radius: 16px; font-size: 0.8rem; cursor: pointer; white-space: nowrap; transition: 0.2s; flex-shrink: 0; }
     .chip:hover { background: #383838; color: #fff; border-color: #555; }
-    #file-preview { display: none; align-items: center; gap: 10px; background: #2f2f2f; padding: 8px 12px; border-radius: 8px; border: 1px solid #424242; width: fit-content; font-size: 0.85rem; }
+    #file-preview { display: none; align-items: center; gap: 10px; background: #2f2f2f; padding: 8px 12px; border-radius: 8px; border: 1px solid #424242; width: fit-content; max-width: 100%; font-size: 0.85rem; }
     #preview-img { height: 40px; width: 40px; object-fit: cover; border-radius: 4px; display: none; }
     #remove-file-btn { background: transparent; border: none; color: #ff5555; cursor: pointer; font-size: 1rem; margin-left: 6px; }
     #input-container { display: flex; gap: 8px; align-items: flex-end; }
@@ -84,13 +87,32 @@ HTML_CONTENT = """<!DOCTYPE html>
     .icon-btn:hover { background: #383838; }
     .icon-btn.recording { background: #3a1c1c; border-color: #ef4444; color: #ef4444; animation: pulse 1.5s infinite; }
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-    #user-input { flex: 1; padding: 12px 16px; border-radius: 18px; border: 1px solid #424242; background: #2f2f2f; color: #fff; outline: none; font-size: 1rem; resize: none; max-height: 150px; min-height: 48px; line-height: 1.4; }
+    #user-input { flex: 1; min-width: 0; padding: 12px 16px; border-radius: 18px; border: 1px solid #424242; background: #2f2f2f; color: #fff; outline: none; font-size: 1rem; resize: none; max-height: 150px; min-height: 48px; line-height: 1.4; }
     #send-btn { height: 48px; min-width: 70px; padding: 0 20px; border-radius: 24px; border: none; background: #fff; color: #000; font-weight: 600; cursor: pointer; flex-shrink: 0; }
     #send-btn.stop-btn { background: #ef4444; color: #fff; }
     .error-box { color: #f87171; background: #450a0a; padding: 10px 14px; border-radius: 8px; border: 1px solid #991b1b; font-size: 0.9rem; }
+
+    /* ---------- Mobile / small screens ---------- */
+    #sidebar-backdrop { display: none; }
+    @media (max-width: 768px) {
+      #menu-btn { display: inline-block; }
+      #sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform 0.25s ease; }
+      #sidebar.open { transform: translateX(0); }
+      #sidebar-backdrop.show { display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 20; }
+      header { padding: 10px; flex-wrap: wrap; }
+      .header-controls { gap: 8px; }
+      #persona-select { max-width: 130px; padding: 6px 8px; }
+      #chat-box { padding: 12px; }
+      .message { max-width: 95%; }
+      #input-wrapper { padding: 10px; }
+      .icon-btn { height: 40px; width: 40px; font-size: 1rem; }
+      #send-btn { height: 40px; min-width: 60px; padding: 0 14px; }
+      #user-input { min-height: 40px; padding: 9px 14px; }
+    }
   </style>
 </head>
 <body>
+  <div id="sidebar-backdrop" onclick="toggleSidebar()"></div>
   <div id="sidebar">
     <button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
     <input type="text" id="chat-search" placeholder="Search chats..." oninput="renderSidebar()">
@@ -105,7 +127,10 @@ HTML_CONTENT = """<!DOCTYPE html>
   </div>
   <div id="main-container">
     <header>
-      <span>AI Assistant Studio Pro</span>
+      <div class="header-left">
+        <button id="menu-btn" onclick="toggleSidebar()">☰</button>
+        <span>AI Assistant Studio Pro</span>
+      </div>
       <div class="header-controls">
         <button id="search-toggle" class="toggle-btn active" onclick="toggleSearch()">Web Search: ON</button>
         <select id="persona-select" onchange="handlePersonaChange(this)">
@@ -144,8 +169,10 @@ HTML_CONTENT = """<!DOCTYPE html>
   </div>
 
   <script>
-    let chats = JSON.parse(localStorage.getItem('ai_chats') || '[]');
-    let currentChatId = localStorage.getItem('ai_current_chat_id') || null;
+    let chats = [];
+    try { chats = JSON.parse(localStorage.getItem('ai_chats') || '[]'); } catch (e) { chats = []; }
+    let currentChatId = null;
+    try { currentChatId = localStorage.getItem('ai_current_chat_id') || null; } catch (e) {}
     let webSearchEnabled = true;
     let selectedFile = null;
     let recognition = null;
@@ -162,7 +189,17 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function escapeHtml(text) {
       if (!text) return '';
-      return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function toggleSidebar() {
+      document.getElementById('sidebar').classList.toggle('open');
+      document.getElementById('sidebar-backdrop').classList.toggle('show');
+    }
+
+    function closeSidebarOnMobile() {
+      document.getElementById('sidebar').classList.remove('open');
+      document.getElementById('sidebar-backdrop').classList.remove('show');
     }
 
     if (chats.length === 0) {
@@ -175,8 +212,12 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     function saveChats() {
-      localStorage.setItem('ai_chats', JSON.stringify(chats));
-      localStorage.setItem('ai_current_chat_id', currentChatId);
+      try {
+        localStorage.setItem('ai_chats', JSON.stringify(chats));
+        localStorage.setItem('ai_current_chat_id', currentChatId);
+      } catch (e) {
+        // Storage full (large attached files) or blocked: keep working in memory
+      }
     }
 
     function getCurrentChat() {
@@ -191,6 +232,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       saveChats();
       renderSidebar();
       renderChatBox();
+      closeSidebarOnMobile();
     }
 
     function loadChat(id) {
@@ -198,6 +240,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       saveChats();
       renderSidebar();
       renderChatBox();
+      closeSidebarOnMobile();
     }
 
     function deleteChat(id, event) {
@@ -277,29 +320,33 @@ HTML_CONTENT = """<!DOCTYPE html>
       msgDiv.appendChild(contentDiv);
 
       if (text && role === 'model') {
-        const words = text.trim().split(/\\s+/).filter(Boolean).length;
-        const readTime = Math.max(1, Math.ceil(words / 200));
-        const metaSpan = document.createElement('div');
-        metaSpan.className = 'msg-actions';
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'action-btn';
-        copyBtn.innerText = '📋 Copy';
-        copyBtn.onclick = () => {
-          navigator.clipboard.writeText(text);
-          copyBtn.innerText = '✅ Copied';
-          setTimeout(() => copyBtn.innerText = '📋 Copy', 2000);
-        };
-        const metaInfo = document.createElement('span');
-        metaInfo.className = 'msg-meta';
-        metaInfo.innerText = `${words} words • ~${readTime} min read`;
-        metaSpan.appendChild(copyBtn);
-        metaSpan.appendChild(metaInfo);
-        msgDiv.appendChild(metaSpan);
+        addMessageActions(msgDiv, text);
       }
 
       box.appendChild(msgDiv);
       box.scrollTop = box.scrollHeight;
       return msgDiv;
+    }
+
+    function addMessageActions(msgDiv, text) {
+      const words = text.trim().split(/\\s+/).filter(Boolean).length;
+      const readTime = Math.max(1, Math.ceil(words / 200));
+      const metaSpan = document.createElement('div');
+      metaSpan.className = 'msg-actions';
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'action-btn';
+      copyBtn.innerText = '📋 Copy';
+      copyBtn.onclick = () => {
+        try { navigator.clipboard.writeText(text); } catch (e) {}
+        copyBtn.innerText = '✅ Copied';
+        setTimeout(() => copyBtn.innerText = '📋 Copy', 2000);
+      };
+      const metaInfo = document.createElement('span');
+      metaInfo.className = 'msg-meta';
+      metaInfo.innerText = `${words} words • ~${readTime} min read`;
+      metaSpan.appendChild(copyBtn);
+      metaSpan.appendChild(metaInfo);
+      msgDiv.appendChild(metaSpan);
     }
 
     function toggleSearch() {
@@ -425,6 +472,8 @@ HTML_CONTENT = """<!DOCTYPE html>
         if (data.enhanced_prompt) {
           input.value = data.enhanced_prompt;
           autoExpand(input);
+        } else if (data.error || data.detail) {
+          alert("Enhance failed: " + (data.error || data.detail));
         }
       } catch (e) {
         alert("Enhance failed: " + e.message);
@@ -453,6 +502,14 @@ HTML_CONTENT = """<!DOCTYPE html>
         btn.innerText = 'Send';
         btn.classList.remove('stop-btn');
       }
+    }
+
+    // Only send plain text history to the backend (files can be huge)
+    function buildHistoryForApi(chat) {
+      return chat.history
+        .slice(0, -1)
+        .filter(m => m.content && m.content.trim())
+        .map(m => ({ role: m.role, content: m.content }));
     }
 
     async function sendMessage() {
@@ -485,6 +542,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       const botMsgDiv = appendMessageUI('model', '', null);
       const contentDiv = botMsgDiv.querySelector('.text-content');
       const systemPrompt = document.getElementById('persona-select').value;
+      let fullText = '';
 
       try {
         const res = await fetch('/api/chat', {
@@ -492,23 +550,24 @@ HTML_CONTENT = """<!DOCTYPE html>
           headers: { 'Content-Type': 'application/json' },
           signal: activeAbortController.signal,
           body: JSON.stringify({
-            history: chat.history.slice(0, -1),
+            history: buildHistoryForApi(chat),
             message: text,
             file: filePayload,
             web_search: webSearchEnabled,
-            system_instruction: systemPrompt
+            system_instruction: systemPrompt === '__NEW__' ? 'You are a helpful assistant.' : systemPrompt
           })
         });
 
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: "HTTP " + res.status }));
           contentDiv.innerHTML = `<div class="error-box">Server Error: ${escapeHtml(err.detail || 'Failed')}</div>`;
+          chat.history.pop();
+          saveChats();
           return;
         }
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
-        let fullText = '';
 
         while (true) {
           const { done, value } = await reader.read();
@@ -519,12 +578,22 @@ HTML_CONTENT = """<!DOCTYPE html>
           box.scrollTop = box.scrollHeight;
         }
 
-        chat.history.push({ role: 'model', content: fullText });
+        if (fullText.trim()) {
+          chat.history.push({ role: 'model', content: fullText });
+          addMessageActions(botMsgDiv, fullText);
+        } else {
+          contentDiv.innerHTML = '<div class="error-box">Empty response from the model. Check your API key and model name.</div>';
+          chat.history.pop();
+        }
         saveChats();
       } catch (err) {
         if (err.name !== 'AbortError') {
           contentDiv.innerHTML = `<div class="error-box">Error: ${escapeHtml(err.message)}</div>`;
+          chat.history.pop();
+        } else if (fullText.trim()) {
+          chat.history.push({ role: 'model', content: fullText });
         }
+        saveChats();
       } finally {
         isStreaming = false;
         activeAbortController = null;
@@ -540,8 +609,8 @@ HTML_CONTENT = """<!DOCTYPE html>
       if (format === 'json') {
         dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(chat, null, 2));
       } else {
-        let md = `# ${chat.title}\n\n`;
-        chat.history.forEach(m => md += `### ${m.role.toUpperCase()}\n${m.content}\n\n`);
+        let md = `# ${chat.title}\\n\\n`;
+        chat.history.forEach(m => md += `### ${m.role.toUpperCase()}\\n${m.content}\\n\\n`);
         dataStr = "data:text/markdown;charset=utf-8," + encodeURIComponent(md);
       }
       const a = document.createElement('a');
@@ -569,25 +638,34 @@ async def enhance_prompt(request: Request):
 
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
-            raise HTTPException(status_code=500, detail="GEMINI_API_KEY missing")
+            return JSONResponse({"error": "GEMINI_API_KEY missing"}, status_code=500)
 
         sys_inst = "Improve this user prompt into a clear, structured prompt. Output ONLY the improved text."
 
         if SDK_MODE == "NEW":
             client = genai.Client(api_key=api_key)
             res = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=MODEL_NAME,
                 contents=f"Enhance: {raw_prompt}",
                 config=types.GenerateContentConfig(system_instruction=sys_inst)
             )
-            return JSONResponse({"enhanced_prompt": res.text.strip()})
+            return JSONResponse({"enhanced_prompt": (res.text or "").strip()})
         else:
             genai_legacy.configure(api_key=api_key)
-            model = genai_legacy.GenerativeModel("gemini-1.5-flash", system_instruction=sys_inst)
+            model = genai_legacy.GenerativeModel(MODEL_NAME, system_instruction=sys_inst)
             res = model.generate_content(f"Enhance: {raw_prompt}")
-            return JSONResponse({"enhanced_prompt": res.text.strip()})
+            return JSONResponse({"enhanced_prompt": (res.text or "").strip()})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def decode_file(file_payload):
+    """Return (bytes, mime, name) from the base64 data URL sent by the browser."""
+    _, b64 = file_payload["data"].split(",", 1)
+    file_bytes = base64.b64decode(b64)
+    mime = file_payload.get("type", "application/octet-stream")
+    name = file_payload.get("name", "file")
+    return file_bytes, mime, name
 
 
 @app.post("/api/chat")
@@ -595,82 +673,127 @@ async def chat_endpoint(request: Request):
     try:
         body = await request.json()
         message = body.get("message", "")
+        history = body.get("history", []) or []
         file_payload = body.get("file")
         system_instruction = body.get("system_instruction", "You are a helpful assistant.")
         web_search = body.get("web_search", True)
 
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
-            raise HTTPException(status_code=500,
-                                detail="GEMINI_API_KEY environment variable is not configured in Vercel.")
+            raise HTTPException(
+                status_code=500,
+                detail="GEMINI_API_KEY environment variable is not configured in Vercel."
+            )
 
         if SDK_MODE == "NEW":
             client = genai.Client(api_key=api_key)
+
+            # Previous turns (text only) so the model remembers the conversation
+            contents = []
+            for m in history:
+                text = (m.get("content") or "").strip()
+                role = m.get("role")
+                if not text or role not in ("user", "model"):
+                    continue
+                contents.append(
+                    types.Content(role=role, parts=[types.Part.from_text(text=text)])
+                )
+
+            # Current user turn
             parts = []
             if message:
                 parts.append(types.Part.from_text(text=message))
 
             if file_payload and "data" in file_payload:
-                _, b64 = file_payload["data"].split(",", 1)
-                file_bytes = base64.b64decode(b64)
-                mime = file_payload.get("type", "application/octet-stream")
-                if mime.startswith("image/"):
+                file_bytes, mime, name = decode_file(file_payload)
+                if mime.startswith("image/") or mime == "application/pdf":
                     parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime))
                 else:
                     try:
                         text_str = file_bytes.decode("utf-8")
                         parts.append(
-                            types.Part.from_text(text=f"\n[Attached file: {file_payload.get('name')}]\n{text_str}"))
+                            types.Part.from_text(text=f"\n[Attached file: {name}]\n{text_str}")
+                        )
                     except Exception:
                         pass
 
-            tools = [{"google_search": {}}] if web_search else None
+            if not parts:
+                raise HTTPException(status_code=400, detail="Empty message.")
+
+            contents.append(types.Content(role="user", parts=parts))
+
+            tools = [types.Tool(google_search=types.GoogleSearch())] if web_search else None
             config = types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 tools=tools
             )
 
-            async def generate_stream():
+            # Plain (sync) generator: Starlette runs it in a thread pool,
+            # so the blocking Gemini stream does not freeze the server.
+            def generate_stream():
                 try:
                     response = client.models.generate_content_stream(
-                        model="gemini-2.0-flash",
-                        contents=parts,
+                        model=MODEL_NAME,
+                        contents=contents,
                         config=config
                     )
                     for chunk in response:
                         if chunk.text:
                             yield chunk.text
                 except Exception as ex:
-                    yield f"\n[Backend Execution Error: {str(ex)}]"
+                    yield f"\n\n⚠️ Error: {str(ex)}"
 
-            return StreamingResponse(generate_stream(), media_type="text/plain")
+            return StreamingResponse(
+                generate_stream(),
+                media_type="text/plain",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+            )
 
         else:
             genai_legacy.configure(api_key=api_key)
-            model_name = "gemini-1.5-flash"
-            model = genai_legacy.GenerativeModel(model_name, system_instruction=system_instruction)
+            model = genai_legacy.GenerativeModel(MODEL_NAME, system_instruction=system_instruction)
+
+            legacy_history = []
+            for m in history:
+                text = (m.get("content") or "").strip()
+                role = m.get("role")
+                if not text or role not in ("user", "model"):
+                    continue
+                legacy_history.append({"role": role, "parts": [text]})
 
             prompt_content = [message] if message else []
             if file_payload and "data" in file_payload:
-                _, b64 = file_payload["data"].split(",", 1)
-                file_bytes = base64.b64decode(b64)
-                mime = file_payload.get("type", "application/octet-stream")
-                if mime.startswith("image/"):
+                file_bytes, mime, name = decode_file(file_payload)
+                if mime.startswith("image/") or mime == "application/pdf":
                     prompt_content.append({"mime_type": mime, "data": file_bytes})
                 else:
                     try:
                         text_str = file_bytes.decode("utf-8")
-                        prompt_content.append(f"\n[Attached file: {file_payload.get('name')}]\n{text_str}")
+                        prompt_content.append(f"\n[Attached file: {name}]\n{text_str}")
                     except Exception:
                         pass
 
+            if not prompt_content:
+                raise HTTPException(status_code=400, detail="Empty message.")
+
+            chat_session = model.start_chat(history=legacy_history)
+
             def generate_legacy():
-                res = model.generate_content(prompt_content, stream=True)
-                for chunk in res:
-                    if chunk.text:
-                        yield chunk.text
+                try:
+                    res = chat_session.send_message(prompt_content, stream=True)
+                    for chunk in res:
+                        if chunk.text:
+                            yield chunk.text
+                except Exception as ex:
+                    yield f"\n\n⚠️ Error: {str(ex)}"
 
-            return StreamingResponse(generate_legacy(), media_type="text/plain")
+            return StreamingResponse(
+                generate_legacy(),
+                media_type="text/plain",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+            )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
