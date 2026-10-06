@@ -703,7 +703,7 @@ async def chat_endpoint(request: Request):
 
         async def generate_stream():
             try:
-                response = client.models.generate_content_stream(
+                response = client.mode|ls.generate_content_stream(
                     model="gemini-3.8-flash",
                     contents=formatted_contents,
                     config=config
