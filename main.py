@@ -10,11 +10,14 @@ from google.genai import types
 
 app = FastAPI(title="AI Assistant Studio Pro")
 
+
 def get_client():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not configured.")
+        raise HTTPException(status_code=500,
+                            detail="GEMINI_API_KEY environment variable is missing in server environment.")
     return genai.Client(api_key=api_key)
+
 
 HTML_CONTENT = """<!DOCTYPE html>
 <html lang="en">
@@ -87,6 +90,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     #user-input { flex: 1; padding: 12px 16px; border-radius: 18px; border: 1px solid #424242; background: #2f2f2f; color: #fff; outline: none; font-size: 1rem; resize: none; max-height: 150px; min-height: 48px; line-height: 1.4; }
     #send-btn { height: 48px; min-width: 70px; padding: 0 20px; border-radius: 24px; border: none; background: #fff; color: #000; font-weight: 600; cursor: pointer; flex-shrink: 0; }
     #send-btn.stop-btn { background: #ef4444; color: #fff; }
+    .error-text { color: #f87171; font-weight: bold; background: #450a0a; padding: 8px 12px; border-radius: 6px; border: 1px solid #991b1b; }
   </style>
 </head>
 <body>
@@ -151,6 +155,18 @@ HTML_CONTENT = """<!DOCTYPE html>
     let isStreaming = false;
     let activeAbortController = null;
 
+    function safeMarkdownParse(str) {
+      if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
+        try { return marked.parse(str); } catch (e) { return escapeHtml(str); }
+      }
+      return escapeHtml(str).replace(/\\n/g, '<br>');
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
     if (chats.length === 0) {
       startNewChat();
     } else {
@@ -201,7 +217,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     function renderSidebar() {
       const list = document.getElementById('history-list');
-      const search = document.getElementById('chat-search').value.toLowerCase();
+      const searchInput = document.getElementById('chat-search');
+      const search = searchInput ? searchInput.value.toLowerCase() : '';
       list.innerHTML = '';
       chats.forEach(chat => {
         if (search && !chat.title.toLowerCase().includes(search)) return;
@@ -244,14 +261,14 @@ HTML_CONTENT = """<!DOCTYPE html>
         } else {
           const badge = document.createElement('div');
           badge.className = 'doc-badge';
-          badge.innerHTML = `📄 <strong>${fileObj.name}</strong> (${(fileObj.size/1024).toFixed(1)} KB)`;
+          badge.innerHTML = `📄 <strong>${escapeHtml(fileObj.name)}</strong> (${(fileObj.size/1024).toFixed(1)} KB)`;
           msgDiv.appendChild(badge);
         }
       }
       const contentDiv = document.createElement('div');
       contentDiv.className = 'text-content';
       if (role === 'model') {
-        contentDiv.innerHTML = text ? marked.parse(text) : '<div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>';
+        contentDiv.innerHTML = text ? safeMarkdownParse(text) : '<div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>';
       } else {
         contentDiv.innerText = text;
       }
@@ -278,13 +295,15 @@ HTML_CONTENT = """<!DOCTYPE html>
       }
       box.appendChild(msgDiv);
       box.scrollTop = box.scrollHeight;
-      if (window.renderMathInElement) {
-        renderMathInElement(msgDiv, {
-          delimiters: [
-            {left: '$$', right: '$$', display: true},
-            {left: '$', right: '$', display: false}
-          ]
-        });
+      if (typeof renderMathInElement === 'function') {
+        try {
+          renderMathInElement(msgDiv, {
+            delimiters: [
+              {left: '$$', right: '$$', display: true},
+              {left: '$', right: '$', display: false}
+            ]
+          });
+        } catch(e) {}
       }
       return msgDiv;
     }
@@ -390,7 +409,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           input.value = input.value ? input.value + ' ' + transcript : transcript;
           autoExpand(input);
         };
-        recognition.onerror = (event) => {
+        recognition.onerror = () => {
           isRecording = false;
           micBtn.classList.remove('recording');
         };
@@ -437,30 +456,39 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
 
     function handleSendOrStop() {
-      if (isStreaming) {
-        if (activeAbortController) activeAbortController.abort();
-        isStreaming = false;
-        setSendButtonState(false);
-      } else {
-        sendMessage();
+      try {
+        if (isStreaming) {
+          if (activeAbortController) activeAbortController.abort();
+          isStreaming = false;
+          setSendButtonState(false);
+        } else {
+          sendMessage();
+        }
+      } catch (err) {
+        alert("Action Error: " + err.message);
       }
     }
 
     function setSendButtonState(streaming) {
       const sendBtn = document.getElementById('send-btn');
-      if (streaming) {
-        sendBtn.innerText = 'Stop ⏹';
-        sendBtn.classList.add('stop-btn');
-      } else {
-        sendBtn.innerText = 'Send';
-        sendBtn.classList.remove('stop-btn');
+      if (sendBtn) {
+        if (streaming) {
+          sendBtn.innerText = 'Stop ⏹';
+          sendBtn.classList.add('stop-btn');
+        } else {
+          sendBtn.innerText = 'Send';
+          sendBtn.classList.remove('stop-btn');
+        }
       }
     }
 
     async function sendMessage() {
       const input = document.getElementById('user-input');
-      const text = input.value.trim();
-      if (!text && !selectedFile) return;
+      const text = input ? input.value.trim() : '';
+      if (!text && !selectedFile) {
+        alert("Please enter a message or upload a file first.");
+        return;
+      }
       const chat = getCurrentChat();
       if (!chat) return;
       if (chat.history.length === 0) {
@@ -470,8 +498,10 @@ HTML_CONTENT = """<!DOCTYPE html>
       const userMsg = { role: 'user', content: text, file: selectedFile };
       chat.history.push(userMsg);
       appendMessageUI('user', text, selectedFile);
-      input.value = '';
-      input.style.height = 'auto';
+      if (input) {
+        input.value = '';
+        input.style.height = 'auto';
+      }
       const filePayload = selectedFile;
       clearFile();
       isStreaming = true;
@@ -480,6 +510,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       const botMsgDiv = appendMessageUI('model', '', null);
       const contentDiv = botMsgDiv.querySelector('.text-content');
       const systemPrompt = document.getElementById('persona-select').value;
+
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
@@ -493,10 +524,13 @@ HTML_CONTENT = """<!DOCTYPE html>
             system_instruction: systemPrompt
           })
         });
+
         if (!res.ok) {
-          const errData = await res.json().catch(() => ({ detail: "Server Error " + res.status }));
-          throw new Error(errData.detail || "Server HTTP " + res.status);
+          const errData = await res.json().catch(() => ({ detail: "HTTP " + res.status }));
+          contentDiv.innerHTML = `<div class="error-text">Server Error: ${escapeHtml(errData.detail || 'Request failed')}</div>`;
+          return;
         }
+
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let accText = '';
@@ -504,7 +538,7 @@ HTML_CONTENT = """<!DOCTYPE html>
           const { done, value } = await reader.read();
           if (done) break;
           accText += decoder.decode(value, { stream: true });
-          contentDiv.innerHTML = marked.parse(accText);
+          contentDiv.innerHTML = safeMarkdownParse(accText);
           const box = document.getElementById('chat-box');
           box.scrollTop = box.scrollHeight;
         }
@@ -513,7 +547,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         renderChatBox();
       } catch (err) {
         if (err.name !== 'AbortError') {
-          contentDiv.innerText = "Error: " + err.message;
+          contentDiv.innerHTML = `<div class="error-text">Client/Network Error: ${escapeHtml(err.message)}</div>`;
         }
       } finally {
         isStreaming = false;
@@ -552,9 +586,11 @@ HTML_CONTENT = """<!DOCTYPE html>
 </body>
 </html>"""
 
+
 @app.get("/", response_class=HTMLResponse)
 async def serve_gui():
     return HTML_CONTENT
+
 
 @app.post("/api/enhance-prompt")
 async def enhance_prompt(request: Request):
@@ -581,6 +617,7 @@ async def enhance_prompt(request: Request):
         return JSONResponse({"enhanced_prompt": response.text.strip()})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 @app.post("/api/chat")
 async def chat_endpoint(request: Request):
@@ -642,7 +679,7 @@ async def chat_endpoint(request: Request):
                     if chunk.text:
                         yield chunk.text
             except Exception as err:
-                yield f"\n[Error: {str(err)}]"
+                yield f"\n[Backend Error: {str(err)}]"
 
         return StreamingResponse(generate_stream(), media_type="text/plain")
 
