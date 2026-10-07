@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
+from supabase import Client, create_client
 
 try:
   from google import genai
@@ -19,6 +20,15 @@ except ImportError:
   SDK_MODE = "LEGACY"
 
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").replace("/rest/v1/", "").strip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+supabase: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_KEY:
+  try:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+  except Exception as e:
+    print(f"Erreur d'initialisation Supabase: {e}")
 
 app = FastAPI(title="AI Assistant Studio Pro")
 
@@ -27,7 +37,12 @@ class EnhanceRequest(BaseModel):
   prompt: str = ""
 
 
+class CreateChatRequest(BaseModel):
+  title: Optional[str] = "New Discussion"
+
+
 class ChatRequest(BaseModel):
+  chat_id: str
   message: str = ""
   history: List[Dict[str, Any]] = []
   file: Optional[Dict[str, Any]] = None
@@ -62,10 +77,8 @@ def check_rate_limit(client_ip: str) -> bool:
       ts for ts in timestamps if now - ts < RATE_LIMIT_WINDOW_SEC
   ]
   ip_request_history[client_ip] = valid_timestamps
-
   if len(valid_timestamps) >= MAX_REQUESTS_PER_WINDOW:
     return False
-
   ip_request_history[client_ip].append(now)
   return True
 
@@ -87,7 +100,6 @@ def log_analytics_entry(
   cost = (prompt_tokens * INPUT_TOKEN_COST_USD) + (
       completion_tokens * OUTPUT_TOKEN_COST_USD
   )
-
   analytics_store["total_requests"] += 1
   if status_code == 200:
     analytics_store["total_successful"] += 1
@@ -96,15 +108,12 @@ def log_analytics_entry(
     analytics_store["total_failed"] += 1
   else:
     analytics_store["total_failed"] += 1
-
   analytics_store["total_prompt_tokens"] += prompt_tokens
   analytics_store["total_completion_tokens"] += completion_tokens
   analytics_store["total_cost_usd"] += cost
-
   analytics_store["latency_ms_history"].append(latency_ms)
   if len(analytics_store["latency_ms_history"]) > 200:
     analytics_store["latency_ms_history"].pop(0)
-
   log_entry = {
       "time": time.strftime("%H:%M:%S"),
       "endpoint": endpoint,
@@ -115,7 +124,6 @@ def log_analytics_entry(
       "completion_tokens": completion_tokens,
       "cost_usd": round(cost, 6),
   }
-
   analytics_store["recent_logs"].insert(0, log_entry)
   if len(analytics_store["recent_logs"]) > 50:
     analytics_store["recent_logs"].pop()
@@ -205,7 +213,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     #send-btn.stop-btn { background: #ef4444; color: #fff; }
     .error-box { color: #f87171; background: #450a0a; padding: 10px 14px; border-radius: 8px; border: 1px solid #991b1b; font-size: 0.9rem; }
     #sidebar-backdrop { display: none; }
-
     .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; padding: 20px; }
     .modal-overlay.open { display: flex; }
     .modal-content { background: #171717; border: 1px solid #333; border-radius: 12px; max-width: 700px; width: 100%; max-height: 85vh; overflow-y: auto; padding: 20px; color: #ececec; display: flex; flex-direction: column; gap: 16px; }
@@ -223,7 +230,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     .log-table th { background: #1a1a1a; color: #888; position: sticky; top: 0; }
     .status-200 { color: #4ade80; font-weight: 600; }
     .status-429 { color: #f87171; font-weight: 600; }
-
     @media (max-width: 768px) {
       #menu-btn { display: inline-block; }
       #sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform 0.25s ease; }
@@ -323,7 +329,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
           <span class="stat-label">Avg Latency</span>
         </div>
       </div>
-
       <div style="font-size: 0.85rem; font-weight: 600; color: #aaa; margin-top: 4px;">Recent API Logs (Last 50)</div>
       <div class="log-table-container">
         <table class="log-table">
@@ -352,6 +357,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
   <script>
     let chats = [];
     let currentChatId = null;
+    let currentHistory = [];
     let webSearchEnabled = true;
     let selectedFile = null;
     let recognition = null;
@@ -359,38 +365,21 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     let isStreaming = false;
     let activeAbortController = null;
 
-    function initStorage() {
+    async function initStorage() {
       try {
-        let raw = JSON.parse(localStorage.getItem('ai_chats'));
-        if (Array.isArray(raw)) {
-          chats = raw.map(c => ({
-            id: c.id || ('chat_' + Date.now()),
-            title: c.title || 'New Discussion',
-            history: Array.isArray(c.history) ? c.history.map(m => {
-              if (typeof m === 'string') return { role: 'user', content: m };
-              return { role: m.role || 'user', content: m.content || '', file: m.file || null, meta: m.meta || null };
-            }) : []
-          }));
+        const res = await fetch('/api/chats');
+        if (res.ok) {
+          chats = await res.json();
         } else {
           chats = [];
         }
       } catch (e) {
         chats = [];
       }
-
-      try {
-        currentChatId = localStorage.getItem('ai_current_chat_id');
-      } catch (e) {
-        currentChatId = null;
-      }
-
       if (!Array.isArray(chats) || chats.length === 0) {
-        startNewChat();
+        await startNewChat();
       } else {
-        if (!currentChatId || !chats.find(c => c.id === currentChatId)) {
-          currentChatId = chats[0].id;
-        }
-        loadChat(currentChatId);
+        await loadChat(chats[0].id);
       }
     }
 
@@ -416,48 +405,54 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       document.getElementById('sidebar-backdrop').classList.remove('show');
     }
 
-    function saveChats() {
+    async function startNewChat() {
       try {
-        localStorage.setItem('ai_chats', JSON.stringify(chats));
-        localStorage.setItem('ai_current_chat_id', currentChatId);
-      } catch (e) {}
-    }
-
-    function getCurrentChat() {
-      if (!Array.isArray(chats)) chats = [];
-      return chats.find(c => c.id === currentChatId);
-    }
-
-    function startNewChat() {
-      const newId = 'chat_' + Date.now();
-      const newChat = { id: newId, title: 'New Discussion', history: [] };
-      if (!Array.isArray(chats)) chats = [];
-      chats.unshift(newChat);
-      currentChatId = newId;
-      saveChats();
-      renderSidebar();
-      renderChatBox();
-      closeSidebarOnMobile();
-    }
-
-    function loadChat(id) {
-      currentChatId = id;
-      saveChats();
-      renderSidebar();
-      renderChatBox();
-      closeSidebarOnMobile();
-    }
-
-    function deleteChat(id, event) {
-      if (event) event.stopPropagation();
-      chats = chats.filter(c => c.id !== id);
-      if (chats.length === 0) {
-        startNewChat();
-      } else {
-        currentChatId = chats[0].id;
-        saveChats();
+        const res = await fetch('/api/chats', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: 'New Discussion' })
+        });
+        const newChat = await res.json();
+        chats.unshift(newChat);
+        currentChatId = newChat.id;
+        currentHistory = [];
         renderSidebar();
         renderChatBox();
+        closeSidebarOnMobile();
+      } catch (e) {
+        console.error("Failed to start new chat:", e);
+      }
+    }
+
+    async function loadChat(id) {
+      currentChatId = id;
+      try {
+        const res = await fetch(`/api/chats/${id}/messages`);
+        if (res.ok) {
+          currentHistory = await res.json();
+        } else {
+          currentHistory = [];
+        }
+      } catch (e) {
+        currentHistory = [];
+      }
+      renderSidebar();
+      renderChatBox();
+      closeSidebarOnMobile();
+    }
+
+    async function deleteChat(id, event) {
+      if (event) event.stopPropagation();
+      try {
+        await fetch(`/api/chats/${id}`, { method: 'DELETE' });
+        chats = chats.filter(c => c.id !== id);
+        if (chats.length === 0) {
+          await startNewChat();
+        } else {
+          await loadChat(chats[0].id);
+        }
+      } catch (e) {
+        console.error("Failed to delete chat:", e);
       }
     }
 
@@ -490,13 +485,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       const box = document.getElementById('chat-box');
       if (!box) return;
       box.innerHTML = '';
-      const chat = getCurrentChat();
-      if (!chat || !Array.isArray(chat.history)) return;
-      chat.history.forEach((msg) => {
+      if (!Array.isArray(currentHistory)) return;
+      currentHistory.forEach((msg) => {
         if (!msg) return;
         const role = msg.role || 'user';
         const content = msg.content || '';
-        appendMessageUI(role, content, msg.file, msg.meta);
+        appendMessageUI(role, content, msg.file_payload || msg.file, msg.meta);
       });
       box.scrollTop = box.scrollHeight;
     }
@@ -539,7 +533,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       const readTime = Math.max(1, Math.ceil(words / 200));
       const estTokens = metaObj && metaObj.total_tokens ? metaObj.total_tokens : Math.max(1, Math.ceil(text.length / 4));
       const estCost = metaObj && metaObj.cost_usd !== undefined ? metaObj.cost_usd : (estTokens * 0.0000003);
-
       const metaSpan = document.createElement('div');
       metaSpan.className = 'msg-actions';
       const copyBtn = document.createElement('button');
@@ -713,10 +706,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       }
     }
 
-    function buildHistoryForApi(chat) {
-      if (!chat || !Array.isArray(chat.history)) return [];
-      return chat.history
-        .slice(0, -1)
+    function buildHistoryForApi() {
+      if (!Array.isArray(currentHistory)) return [];
+      return currentHistory
         .filter(m => m && m.content && String(m.content).trim())
         .map(m => ({ role: m.role || 'user', content: String(m.content) }));
     }
@@ -725,50 +717,52 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       const input = document.getElementById('user-input');
       const text = input ? input.value.trim() : '';
       if (!text && !selectedFile) return;
-      let chat = getCurrentChat();
-      if (!chat) {
-        startNewChat();
-        chat = getCurrentChat();
+
+      if (!currentChatId) {
+        await startNewChat();
       }
-      if (chat.history.length === 0) {
-        chat.title = text ? (text.slice(0, 30) + (text.length > 30 ? '...' : '')) : (selectedFile ? selectedFile.name : 'New Discussion');
-        renderSidebar();
-      }
+
       const filePayload = selectedFile;
-      chat.history.push({ role: 'user', content: text, file: filePayload });
+      currentHistory.push({ role: 'user', content: text, file_payload: filePayload });
       appendMessageUI('user', text, filePayload);
+
       if (input) {
         input.value = '';
         input.style.height = 'auto';
       }
       clearFile();
+
       isStreaming = true;
       updateSendBtnUI(true);
       activeAbortController = new AbortController();
+
       const botMsgDiv = appendMessageUI('model', '', null);
       const contentDiv = botMsgDiv.querySelector('.text-content');
       const systemPrompt = document.getElementById('persona-select').value;
       let fullText = '';
+
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: activeAbortController.signal,
           body: JSON.stringify({
-            history: buildHistoryForApi(chat),
+            chat_id: currentChatId,
+            history: buildHistoryForApi(),
             message: text,
             file: filePayload,
             web_search: webSearchEnabled,
             system_instruction: systemPrompt === '__NEW__' ? 'You are a helpful assistant.' : systemPrompt
           })
         });
+
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: "HTTP " + res.status }));
           contentDiv.innerHTML = `<div class="error-box">Server Error (${res.status}): ${escapeHtml(err.detail || 'Failed')}</div>`;
-          chat.history.pop();
-          saveChats();
+          currentHistory.pop();
           return;
         }
+
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         while (true) {
@@ -779,22 +773,26 @@ HTML_CONTENT = r"""<!DOCTYPE html>
           const box = document.getElementById('chat-box');
           box.scrollTop = box.scrollHeight;
         }
+
         if (fullText.trim()) {
-          chat.history.push({ role: 'model', content: fullText });
+          currentHistory.push({ role: 'model', content: fullText });
           addMessageActions(botMsgDiv, fullText);
+          const activeChat = chats.find(c => c.id === currentChatId);
+          if (activeChat && (activeChat.title === 'New Discussion' || !activeChat.title)) {
+            activeChat.title = text ? (text.slice(0, 30) + (text.length > 30 ? '...' : '')) : 'New Discussion';
+            renderSidebar();
+          }
         } else {
           contentDiv.innerHTML = '<div class="error-box">Empty response from model.</div>';
-          chat.history.pop();
+          currentHistory.pop();
         }
-        saveChats();
       } catch (err) {
         if (err.name !== 'AbortError') {
           contentDiv.innerHTML = `<div class="error-box">Error: ${escapeHtml(err.message)}</div>`;
-          chat.history.pop();
+          currentHistory.pop();
         } else if (fullText.trim()) {
-          chat.history.push({ role: 'model', content: fullText });
+          currentHistory.push({ role: 'model', content: fullText });
         }
-        saveChats();
       } finally {
         isStreaming = false;
         activeAbortController = null;
@@ -803,15 +801,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     }
 
     function exportChat(format) {
-      const chat = getCurrentChat();
-      if (!chat || chat.history.length === 0) return alert("Nothing to export!");
+      if (!currentHistory || currentHistory.length === 0) return alert("Nothing to export!");
       let dataStr = '';
       let filename = `chat_${Date.now()}.${format}`;
       if (format === 'json') {
-        dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(chat, null, 2));
+        dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(currentHistory, null, 2));
       } else {
-        let md = `# ${chat.title}\n\n`;
-        chat.history.forEach(m => md += `### ${(m.role||'user').toUpperCase()}\n${m.content||''}\n\n`);
+        let md = `# Chat Export\n\n`;
+        currentHistory.forEach(m => md += `### ${(m.role||'user').toUpperCase()}\n${m.content||''}\n\n`);
         dataStr = "data:text/markdown;charset=utf-8," + encodeURIComponent(md);
       }
       const a = document.createElement('a');
@@ -844,6 +841,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
           tableBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #666;">No logs recorded yet.</td></tr>';
           return;
         }
+
         let html = '';
         data.recent_logs.forEach(log => {
           const statusClass = log.status === 200 ? 'status-200' : 'status-429';
@@ -871,11 +869,72 @@ def serve_gui():
   return HTML_CONTENT
 
 
+@app.get("/api/chats")
+def get_chats():
+  if not supabase:
+    return JSONResponse([])
+  try:
+    res = (
+        supabase.table("chats")
+        .select("*")
+        .order("updated_at", desc=True)
+        .execute()
+    )
+    return JSONResponse(res.data or [])
+  except Exception as e:
+    return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/chats")
+def create_chat(body: CreateChatRequest):
+  chat_id = f"chat_{int(time.time()*1000)}"
+  title = body.title or "New Discussion"
+  if supabase:
+    try:
+      res = (
+          supabase.table("chats")
+          .insert({"id": chat_id, "title": title})
+          .execute()
+      )
+      return JSONResponse(
+          res.data[0] if res.data else {"id": chat_id, "title": title}
+      )
+    except Exception as e:
+      return JSONResponse({"error": str(e)}, status_code=500)
+  return JSONResponse({"id": chat_id, "title": title})
+
+
+@app.get("/api/chats/{chat_id}/messages")
+def get_messages(chat_id: str):
+  if not supabase:
+    return JSONResponse([])
+  try:
+    res = (
+        supabase.table("messages")
+        .select("*")
+        .eq("chat_id", chat_id)
+        .order("created_at", desc=False)
+        .execute()
+    )
+    return JSONResponse(res.data or [])
+  except Exception as e:
+    return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/chats/{chat_id}")
+def delete_chat(chat_id: str):
+  if supabase:
+    try:
+      supabase.table("chats").delete().eq("id", chat_id).execute()
+    except Exception as e:
+      return JSONResponse({"error": str(e)}, status_code=500)
+  return JSONResponse({"status": "deleted"})
+
+
 @app.get("/api/admin/stats")
 def get_admin_stats(request: Request):
   latencies = analytics_store["latency_ms_history"]
   avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
-
   return JSONResponse({
       "total_requests": analytics_store["total_requests"],
       "total_successful": analytics_store["total_successful"],
@@ -893,11 +952,8 @@ def get_admin_stats(request: Request):
 def enhance_prompt(body: EnhanceRequest, request: Request):
   start_time = time.time()
   client_ip = request.client.host if request.client else "127.0.0.1"
-
   if not check_rate_limit(client_ip):
-    log_analytics_entry(
-        "/api/enhance-prompt", 429, 0.0, 0, 0, client_ip
-    )
+    log_analytics_entry("/api/enhance-prompt", 429, 0.0, 0, 0, client_ip)
     raise HTTPException(
         status_code=429, detail="Too Many Requests. Rate limit exceeded."
     )
@@ -938,7 +994,6 @@ def enhance_prompt(body: EnhanceRequest, request: Request):
     log_analytics_entry(
         "/api/enhance-prompt", 200, latency_ms, p_tokens, c_tokens, client_ip
     )
-
     return JSONResponse({"enhanced_prompt": enhanced})
   except Exception as e:
     latency_ms = (time.time() - start_time) * 1000
@@ -964,6 +1019,7 @@ def chat_endpoint(body: ChatRequest, request: Request):
     )
 
   try:
+    chat_id = body.chat_id
     message = body.message
     history = body.history or []
     file_payload = body.file
@@ -976,6 +1032,25 @@ def chat_endpoint(body: ChatRequest, request: Request):
           status_code=500,
           detail="GEMINI_API_KEY environment variable is not configured.",
       )
+
+    # Sauvegarde du message utilisateur dans Supabase
+    if supabase and chat_id and message:
+      try:
+        supabase.table("messages").insert({
+            "chat_id": chat_id,
+            "role": "user",
+            "content": message,
+            "file_payload": file_payload,
+        }).execute()
+        # Mettre à jour le titre du chat s'il s'agit du premier message
+        title_snippet = (
+            message[:30] + "..." if len(message) > 30 else message
+        ) or "New Discussion"
+        supabase.table("chats").update(
+            {"title": title_snippet, "updated_at": "now()"}
+        ).eq("id", chat_id).execute()
+      except Exception as ex:
+        print("Failed to save user message:", ex)
 
     prompt_tokens_est = estimate_tokens(message) + estimate_tokens(
         system_instruction
@@ -1058,6 +1133,18 @@ def chat_endpoint(body: ChatRequest, request: Request):
                 comp_tokens,
                 client_ip,
             )
+
+            # Sauvegarder la réponse de l'IA dans Supabase
+            if supabase and chat_id and total_output_text:
+              try:
+                supabase.table("messages").insert({
+                    "chat_id": chat_id,
+                    "role": "model",
+                    "content": total_output_text,
+                }).execute()
+              except Exception as ex:
+                print("Failed to save model message:", ex)
+
             break
           except Exception as ex:
             err_msg = str(ex)
@@ -1067,20 +1154,12 @@ def chat_endpoint(body: ChatRequest, request: Request):
               time.sleep(backoff)
               backoff *= 2
               continue
-
             latency_ms = (time.time() - start_time) * 1000
             status_code = 429 if "429" in err_msg else 500
             log_analytics_entry(
                 "/api/chat", status_code, latency_ms, 0, 0, client_ip
             )
-
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-              yield (
-                  "\n\n⚠️ **API Quota Exceeded (429):** Your Gemini API Key has"
-                  " exceeded its limit. Turn OFF Web Search or update your key."
-              )
-            else:
-              yield f"\n\n⚠ Error: {err_msg}"
+            yield f"\n\n⚠️ Error: {err_msg}"
             break
 
       return StreamingResponse(
@@ -1139,6 +1218,18 @@ def chat_endpoint(body: ChatRequest, request: Request):
                 comp_tokens,
                 client_ip,
             )
+
+            # Sauvegarder la réponse de l'IA dans Supabase
+            if supabase and chat_id and total_output_text:
+              try:
+                supabase.table("messages").insert({
+                    "chat_id": chat_id,
+                    "role": "model",
+                    "content": total_output_text,
+                }).execute()
+              except Exception as ex:
+                print("Failed to save model message:", ex)
+
             break
           except Exception as ex:
             err_msg = str(ex)
@@ -1148,25 +1239,18 @@ def chat_endpoint(body: ChatRequest, request: Request):
               time.sleep(backoff)
               backoff *= 2
               continue
-
             latency_ms = (time.time() - start_time) * 1000
             status_code = 429 if "429" in err_msg else 500
             log_analytics_entry(
                 "/api/chat", status_code, latency_ms, 0, 0, client_ip
             )
-
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-              yield (
-                  "\n\n⚠️ **API Quota Exceeded (429):** Your Gemini API Key has"
-                  " exceeded its limit. Turn OFF Web Search or update your key."
-              )
-            else:
-              yield f"\n\n⚠️ Error: {err_msg}"
+            yield f"\n\n⚠️ Error: {err_msg}"
             break
 
       return StreamingResponse(
           generate_legacy(), media_type="text/event-stream", headers=headers
       )
+
   except HTTPException:
     raise
   except Exception as e:
