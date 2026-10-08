@@ -4,23 +4,23 @@ import json
 import os
 import time
 from typing import Any, Dict, List, Optional
-
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from supabase import Client, create_client
 
+# Try loading new Google GenAI SDK, fallback to legacy if not installed
 try:
-  from google import genai
-  from google.genai import types
+    from google import genai
+    from google.genai import types
 
-  SDK_MODE = "NEW"
+    SDK_MODE = "NEW"
 except ImportError:
-  import google.generativeai as genai_legacy
+    import google.generativeai as genai_legacy
 
-  SDK_MODE = "LEGACY"
+    SDK_MODE = "LEGACY"
 
-MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 SUPABASE_URL = (
     os.environ.get("SUPABASE_URL", "").replace("/rest/v1/", "").strip("/")
 )
@@ -28,10 +28,10 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 supabase: Optional[Client] = None
 if SUPABASE_URL and SUPABASE_KEY:
-  try:
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-  except Exception as e:
-    print(f"Erreur d'initialisation Supabase: {e}")
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        print(f"Erreur d'initialisation Supabase: {e}")
 
 app = FastAPI(title="AI Assistant Studio Pro")
 
@@ -40,37 +40,37 @@ app = FastAPI(title="AI Assistant Studio Pro")
 def get_current_user(
     authorization: Optional[str] = Header(None),
 ) -> Optional[Any]:
-  if not authorization or not authorization.startswith("Bearer "):
-    return None
-  token = authorization.split(" ")[1]
-  if not supabase:
-    return None
-  try:
-    user_response = supabase.auth.get_user(token)
-    if not user_response or not user_response.user:
-      return None
-    return user_response.user
-  except Exception as e:
-    print(f"Authentication error: {e}")
-    return None
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.split(" ")[1]
+    if not supabase:
+        return None
+    try:
+        user_response = supabase.auth.get_user(token)
+        if not user_response or not user_response.user:
+            return None
+        return user_response.user
+    except Exception as e:
+        print(f"Authentication error: {e}")
+        return None
 
 
 # --- Request Models ---
 class EnhanceRequest(BaseModel):
-  prompt: str = ""
+    prompt: str = ""
 
 
 class CreateChatRequest(BaseModel):
-  title: Optional[str] = "New Discussion"
+    title: Optional[str] = "New Discussion"
 
 
 class ChatRequest(BaseModel):
-  chat_id: Optional[str] = "default_chat"
-  message: str = ""
-  history: List[Dict[str, Any]] = []
-  file: Optional[Dict[str, Any]] = None
-  system_instruction: str = "You are a helpful assistant."
-  web_search: bool = True
+    chat_id: Optional[str] = "default_chat"
+    message: str = ""
+    history: List[Dict[str, Any]] = []
+    file: Optional[Dict[str, Any]] = None
+    system_instruction: str = "You are a helpful assistant."
+    web_search: bool = True
 
 
 # --- Rate Limiting & Analytics ---
@@ -94,23 +94,30 @@ analytics_store = {
 }
 
 
+def get_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
+
+
 def check_rate_limit(client_ip: str) -> bool:
-  now = time.time()
-  timestamps = ip_request_history[client_ip]
-  valid_timestamps = [
-      ts for ts in timestamps if now - ts < RATE_LIMIT_WINDOW_SEC
-  ]
-  ip_request_history[client_ip] = valid_timestamps
-  if len(valid_timestamps) >= MAX_REQUESTS_PER_WINDOW:
-    return False
-  ip_request_history[client_ip].append(now)
-  return True
+    now = time.time()
+    timestamps = ip_request_history[client_ip]
+    valid_timestamps = [
+        ts for ts in timestamps if now - ts < RATE_LIMIT_WINDOW_SEC
+    ]
+    ip_request_history[client_ip] = valid_timestamps
+    if len(valid_timestamps) >= MAX_REQUESTS_PER_WINDOW:
+        return False
+    ip_request_history[client_ip].append(now)
+    return True
 
 
 def estimate_tokens(text: str) -> int:
-  if not text:
-    return 0
-  return max(1, len(text) // 4)
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
 
 
 def log_analytics_entry(
@@ -121,46 +128,48 @@ def log_analytics_entry(
     completion_tokens: int,
     client_ip: str,
 ):
-  cost = (prompt_tokens * INPUT_TOKEN_COST_USD) + (
-      completion_tokens * OUTPUT_TOKEN_COST_USD
-  )
-  analytics_store["total_requests"] += 1
-  if status_code == 200:
-    analytics_store["total_successful"] += 1
-  elif status_code == 429:
-    analytics_store["total_rate_limited"] += 1
-    analytics_store["total_failed"] += 1
-  else:
-    analytics_store["total_failed"] += 1
+    cost = (prompt_tokens * INPUT_TOKEN_COST_USD) + (
+        completion_tokens * OUTPUT_TOKEN_COST_USD
+    )
+    analytics_store["total_requests"] += 1
+    if status_code == 200:
+        analytics_store["total_successful"] += 1
+    elif status_code == 429:
+        analytics_store["total_rate_limited"] += 1
+        analytics_store["total_failed"] += 1
+    else:
+        analytics_store["total_failed"] += 1
 
-  analytics_store["total_prompt_tokens"] += prompt_tokens
-  analytics_store["total_completion_tokens"] += completion_tokens
-  analytics_store["total_cost_usd"] += cost
-  analytics_store["latency_ms_history"].append(latency_ms)
-  if len(analytics_store["latency_ms_history"]) > 200:
-    analytics_store["latency_ms_history"].pop(0)
+    analytics_store["total_prompt_tokens"] += prompt_tokens
+    analytics_store["total_completion_tokens"] += completion_tokens
+    analytics_store["total_cost_usd"] += cost
+    analytics_store["latency_ms_history"].append(latency_ms)
 
-  log_entry = {
-      "time": time.strftime("%H:%M:%S"),
-      "endpoint": endpoint,
-      "ip": client_ip,
-      "status": status_code,
-      "latency_ms": round(latency_ms, 1),
-      "prompt_tokens": prompt_tokens,
-      "completion_tokens": completion_tokens,
-      "cost_usd": round(cost, 6),
-  }
-  analytics_store["recent_logs"].insert(0, log_entry)
-  if len(analytics_store["recent_logs"]) > 50:
-    analytics_store["recent_logs"].pop()
+    if len(analytics_store["latency_ms_history"]) > 200:
+        analytics_store["latency_ms_history"].pop(0)
+
+    log_entry = {
+        "time": time.strftime("%H:%M:%S"),
+        "endpoint": endpoint,
+        "ip": client_ip,
+        "status": status_code,
+        "latency_ms": round(latency_ms, 1),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cost_usd": round(cost, 6),
+    }
+
+    analytics_store["recent_logs"].insert(0, log_entry)
+    if len(analytics_store["recent_logs"]) > 50:
+        analytics_store["recent_logs"].pop()
 
 
-def decode_file(file_payload):
-  _, b64 = file_payload["data"].split(",", 1)
-  file_bytes = base64.b64decode(b64)
-  mime = file_payload.get("type", "application/octet-stream")
-  name = file_payload.get("name", "file")
-  return file_bytes, mime, name
+def decode_file(file_payload: dict):
+    _, b64 = file_payload["data"].split(",", 1)
+    file_bytes = base64.b64decode(b64)
+    mime = file_payload.get("type", "application/octet-stream")
+    name = file_payload.get("name", "file")
+    return file_bytes, mime, name
 
 
 HTML_CONTENT = r"""<!DOCTYPE html>
@@ -207,7 +216,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     .user { align-self: flex-end; background-color: #303030; color: #fff; border-bottom-right-radius: 2px; }
     .model { align-self: flex-start; background-color: #212121; color: #ececec; border-bottom-left-radius: 2px; border: 1px solid #333; width: 100%; }
     .message img { max-width: 100%; border-radius: 8px; margin-top: 8px; }
-    .message pre { overflow-x: auto; background: #171717; padding: 10px; border-radius: 8px; }
+    .message pre { overflow-x: auto; background: #171717; padding: 10px; border-radius: 8px; margin: 8px 0; }
     .doc-badge { display: inline-flex; align-items: center; gap: 8px; background: #1e293b; border: 1px solid #334155; padding: 8px 12px; border-radius: 8px; margin-bottom: 6px; font-size: 0.88rem; color: #38bdf8; }
     .message p { margin-bottom: 8px; }
     .message p:last-child { margin-bottom: 0; }
@@ -287,6 +296,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       </div>
     </div>
   </div>
+
   <div id="main-container">
     <header>
       <div class="header-left">
@@ -305,7 +315,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         </select>
       </div>
     </header>
+
     <div id="chat-box"></div>
+
     <div id="input-wrapper">
       <div class="chips-row">
         <button class="chip" onclick="applyChip('Summarize this context clearly:')">📝 Summarize</button>
@@ -330,6 +342,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       </div>
     </div>
   </div>
+
   <div id="analytics-modal" class="modal-overlay" onclick="if(event.target===this) closeAnalyticsModal()">
     <div class="modal-content">
       <div class="modal-header">
@@ -378,6 +391,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       </div>
     </div>
   </div>
+
   <script>
     let chats = [];
     let currentChatId = null;
@@ -388,6 +402,18 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     let isRecording = false;
     let isStreaming = false;
     let activeAbortController = null;
+
+    if (window.marked) {
+      window.marked.setOptions({
+        highlight: function(code, lang) {
+          if (lang && window.hljs && window.hljs.getLanguage(lang)) {
+            try { return window.hljs.highlight(code, { language: lang }).value; } catch (e) {}
+          }
+          return window.hljs ? window.hljs.highlightAuto(code).value : code;
+        },
+        breaks: true
+      });
+    }
 
     function getAuthHeaders() {
       const headers = { 'Content-Type': 'application/json' };
@@ -758,7 +784,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       const filePayload = selectedFile;
       currentHistory.push({ role: 'user', content: text, file_payload: filePayload });
       appendMessageUI('user', text, filePayload);
-
       if (input) {
         input.value = '';
         input.style.height = 'auto';
@@ -869,11 +894,13 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         document.getElementById('stat-cost').innerText = `$${data.total_cost_usd.toFixed(5)}`;
         document.getElementById('stat-tokens').innerText = (data.total_prompt_tokens + data.total_completion_tokens).toLocaleString();
         document.getElementById('stat-latency').innerText = `${data.avg_latency_ms.toFixed(0)}ms`;
+
         const tableBody = document.getElementById('log-table-body');
         if (!data.recent_logs || data.recent_logs.length === 0) {
           tableBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #666;">No logs recorded yet.</td></tr>';
           return;
         }
+
         let html = '';
         data.recent_logs.forEach(log => {
           const statusClass = log.status === 200 ? 'status-200' : 'status-429';
@@ -898,95 +925,95 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
 @app.get("/", response_class=HTMLResponse)
 def serve_gui():
-  return HTML_CONTENT
+    return HTML_CONTENT
 
 
 @app.get("/api/chats")
 def get_chats(user: Any = Depends(get_current_user)):
-  if not supabase:
-    return JSONResponse([])
-  try:
-    query = supabase.table("chats").select("*")
-    if user and hasattr(user, "id"):
-      query = query.eq("user_id", user.id)
-    res = query.order("updated_at", desc=True).execute()
-    return JSONResponse(res.data or [])
-  except Exception as e:
-    return JSONResponse({"error": str(e)}, status_code=500)
+    if not supabase:
+        return JSONResponse([])
+    try:
+        query = supabase.table("chats").select("*")
+        if user and hasattr(user, "id"):
+            query = query.eq("user_id", user.id)
+        res = query.order("updated_at", desc=True).execute()
+        return JSONResponse(res.data or [])
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/chats")
 def create_chat(
     body: CreateChatRequest, user: Any = Depends(get_current_user)
 ):
-  chat_id = f"chat_{int(time.time() * 1000)}"
-  title = body.title or "New Discussion"
-  if supabase:
-    payload = {"id": chat_id, "title": title}
-    if user and hasattr(user, "id"):
-      payload["user_id"] = user.id
-    try:
-      res = supabase.table("chats").insert(payload).execute()
-      return JSONResponse(
-          res.data[0] if res.data else {"id": chat_id, "title": title}
-      )
-    except Exception:
-      try:
-        res = (
-            supabase.table("chats")
-            .insert({"id": chat_id, "title": title})
-            .execute()
-        )
-        return JSONResponse(
-            res.data[0] if res.data else {"id": chat_id, "title": title}
-        )
-      except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-  return JSONResponse({"id": chat_id, "title": title})
+    chat_id = f"chat_{int(time.time() * 1000)}"
+    title = body.title or "New Discussion"
+    if supabase:
+        payload = {"id": chat_id, "title": title}
+        if user and hasattr(user, "id"):
+            payload["user_id"] = user.id
+        try:
+            res = supabase.table("chats").insert(payload).execute()
+            return JSONResponse(
+                res.data[0] if res.data else {"id": chat_id, "title": title}
+            )
+        except Exception:
+            try:
+                res = (
+                    supabase.table("chats")
+                    .insert({"id": chat_id, "title": title})
+                    .execute()
+                )
+                return JSONResponse(
+                    res.data[0] if res.data else {"id": chat_id, "title": title}
+                )
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"id": chat_id, "title": title})
 
 
 @app.get("/api/chats/{chat_id}/messages")
 def get_messages(chat_id: str, user: Any = Depends(get_current_user)):
-  if not supabase:
-    return JSONResponse([])
-  try:
-    res = (
-        supabase.table("messages")
-        .select("*")
-        .eq("chat_id", chat_id)
-        .order("created_at", desc=False)
-        .execute()
-    )
-    return JSONResponse(res.data or [])
-  except Exception as e:
-    return JSONResponse({"error": str(e)}, status_code=500)
+    if not supabase:
+        return JSONResponse([])
+    try:
+        res = (
+            supabase.table("messages")
+            .select("*")
+            .eq("chat_id", chat_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        return JSONResponse(res.data or [])
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.delete("/api/chats/{chat_id}")
 def delete_chat(chat_id: str, user: Any = Depends(get_current_user)):
-  if supabase:
-    try:
-      supabase.table("chats").delete().eq("id", chat_id).execute()
-    except Exception as e:
-      return JSONResponse({"error": str(e)}, status_code=500)
-  return JSONResponse({"status": "deleted"})
+    if supabase:
+        try:
+            supabase.table("chats").delete().eq("id", chat_id).execute()
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"status": "deleted"})
 
 
 @app.get("/api/admin/stats")
 def get_admin_stats(request: Request):
-  latencies = analytics_store["latency_ms_history"]
-  avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
-  return JSONResponse({
-      "total_requests": analytics_store["total_requests"],
-      "total_successful": analytics_store["total_successful"],
-      "total_failed": analytics_store["total_failed"],
-      "total_rate_limited": analytics_store["total_rate_limited"],
-      "total_prompt_tokens": analytics_store["total_prompt_tokens"],
-      "total_completion_tokens": analytics_store["total_completion_tokens"],
-      "total_cost_usd": round(analytics_store["total_cost_usd"], 6),
-      "avg_latency_ms": round(avg_latency, 1),
-      "recent_logs": analytics_store["recent_logs"],
-  })
+    latencies = analytics_store["latency_ms_history"]
+    avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
+    return JSONResponse({
+        "total_requests": analytics_store["total_requests"],
+        "total_successful": analytics_store["total_successful"],
+        "total_failed": analytics_store["total_failed"],
+        "total_rate_limited": analytics_store["total_rate_limited"],
+        "total_prompt_tokens": analytics_store["total_prompt_tokens"],
+        "total_completion_tokens": analytics_store["total_completion_tokens"],
+        "total_cost_usd": round(analytics_store["total_cost_usd"], 6),
+        "avg_latency_ms": round(avg_latency, 1),
+        "recent_logs": analytics_store["recent_logs"],
+    })
 
 
 @app.post("/api/enhance-prompt")
@@ -995,58 +1022,59 @@ def enhance_prompt(
     request: Request,
     user: Any = Depends(get_current_user),
 ):
-  start_time = time.time()
-  client_ip = request.client.host if request.client else "127.0.0.1"
-  if not check_rate_limit(client_ip):
-    log_analytics_entry("/api/enhance-prompt", 429, 0.0, 0, 0, client_ip)
-    raise HTTPException(
-        status_code=429, detail="Too Many Requests. Rate limit exceeded."
-    )
+    start_time = time.time()
+    client_ip = get_client_ip(request)
 
-  try:
-    raw_prompt = body.prompt.strip()
-    if not raw_prompt:
-      return JSONResponse({"enhanced_prompt": ""})
+    if not check_rate_limit(client_ip):
+        log_analytics_entry("/api/enhance-prompt", 429, 0.0, 0, 0, client_ip)
+        raise HTTPException(
+            status_code=429, detail="Too Many Requests. Rate limit exceeded."
+        )
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-      return JSONResponse({"error": "GEMINI_API_KEY missing"}, status_code=500)
+    try:
+        raw_prompt = body.prompt.strip()
+        if not raw_prompt:
+            return JSONResponse({"enhanced_prompt": ""})
 
-    sys_inst = (
-        "Improve this user prompt into a clear, structured prompt. Output ONLY"
-        " the improved text."
-    )
-    p_tokens = estimate_tokens(raw_prompt) + estimate_tokens(sys_inst)
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return JSONResponse({"error": "GEMINI_API_KEY missing"}, status_code=500)
 
-    if SDK_MODE == "NEW":
-      client = genai.Client(api_key=api_key)
-      res = client.models.generate_content(
-          model=MODEL_NAME,
-          contents=f"Enhance: {raw_prompt}",
-          config=types.GenerateContentConfig(system_instruction=sys_inst),
-      )
-      enhanced = (res.text or "").strip()
-    else:
-      genai_legacy.configure(api_key=api_key)
-      model = genai_legacy.GenerativeModel(
-          MODEL_NAME, system_instruction=sys_inst
-      )
-      res = model.generate_content(f"Enhance: {raw_prompt}")
-      enhanced = (res.text or "").strip()
+        sys_inst = (
+            "Improve this user prompt into a clear, structured prompt. Output ONLY"
+            " the improved text."
+        )
+        p_tokens = estimate_tokens(raw_prompt) + estimate_tokens(sys_inst)
 
-    c_tokens = estimate_tokens(enhanced)
-    latency_ms = (time.time() - start_time) * 1000
-    log_analytics_entry(
-        "/api/enhance-prompt", 200, latency_ms, p_tokens, c_tokens, client_ip
-    )
-    return JSONResponse({"enhanced_prompt": enhanced})
+        if SDK_MODE == "NEW":
+            client = genai.Client(api_key=api_key)
+            res = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=f"Enhance: {raw_prompt}",
+                config=types.GenerateContentConfig(system_instruction=sys_inst),
+            )
+            enhanced = (res.text or "").strip()
+        else:
+            genai_legacy.configure(api_key=api_key)
+            model = genai_legacy.GenerativeModel(
+                MODEL_NAME, system_instruction=sys_inst
+            )
+            res = model.generate_content(f"Enhance: {raw_prompt}")
+            enhanced = (res.text or "").strip()
 
-  except Exception as e:
-    latency_ms = (time.time() - start_time) * 1000
-    log_analytics_entry(
-        "/api/enhance-prompt", 500, latency_ms, 0, 0, client_ip
-    )
-    return JSONResponse({"error": str(e)}, status_code=500)
+        c_tokens = estimate_tokens(enhanced)
+        latency_ms = (time.time() - start_time) * 1000
+        log_analytics_entry(
+            "/api/enhance-prompt", 200, latency_ms, p_tokens, c_tokens, client_ip
+        )
+        return JSONResponse({"enhanced_prompt": enhanced})
+
+    except Exception as e:
+        latency_ms = (time.time() - start_time) * 1000
+        log_analytics_entry(
+            "/api/enhance-prompt", 500, latency_ms, 0, 0, client_ip
+        )
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/chat")
@@ -1055,291 +1083,280 @@ def chat_endpoint(
     request: Request,
     user: Any = Depends(get_current_user),
 ):
-  start_time = time.time()
-  client_ip = request.client.host if request.client else "127.0.0.1"
+    start_time = time.time()
+    client_ip = get_client_ip(request)
 
-  if not check_rate_limit(client_ip):
-    log_analytics_entry("/api/chat", 429, 0.0, 0, 0, client_ip)
-    raise HTTPException(
-        status_code=429,
-        detail=(
-            "Too Many Requests. Rate limit exceeded (30 reqs/min). Please wait"
-            " a moment."
-        ),
-    )
-
-  try:
-    chat_id = body.chat_id
-    message = body.message
-    history = body.history or []
-    file_payload = body.file
-    system_instruction = body.system_instruction or "You are a helpful assistant."
-    web_search = body.web_search
-
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-      raise HTTPException(
-          status_code=500,
-          detail="GEMINI_API_KEY environment variable is not configured.",
-      )
-
-    if supabase and chat_id and message:
-      user_id = user.id if user and hasattr(user, "id") else None
-      db_payload = {
-          "chat_id": chat_id,
-          "role": "user",
-          "content": message,
-          "file_payload": file_payload,
-      }
-      if user_id:
-        db_payload["user_id"] = user_id
-
-      try:
-        supabase.table("messages").insert(db_payload).execute()
-      except Exception:
-        try:
-          supabase.table("messages").insert({
-              "chat_id": chat_id,
-              "role": "user",
-              "content": message,
-              "file_payload": file_payload,
-          }).execute()
-        except Exception as ex:
-          print("Failed to save user message:", ex)
-
-      try:
-        title_snippet = (
-            message[:30] + "..." if len(message) > 30 else message
-        ) or "New Discussion"
-        supabase.table("chats").update(
-            {"title": title_snippet, "updated_at": "now()"}
-        ).eq("id", chat_id).execute()
-      except Exception as ex:
-        print("Failed to update chat title:", ex)
-
-    prompt_tokens_est = estimate_tokens(message) + estimate_tokens(
-        system_instruction
-    )
-    for h in history:
-      prompt_tokens_est += estimate_tokens(h.get("content", ""))
-
-    headers = {
-        "Cache-Control": "no-cache, no-transform",
-        "X-Accel-Buffering": "no",
-        "Connection": "keep-alive",
-    }
-
-    if SDK_MODE == "NEW":
-      client = genai.Client(api_key=api_key)
-      contents = []
-      for m in history:
-        text = (m.get("content") or "").strip()
-        role = m.get("role")
-        if not text or role not in ("user", "model"):
-          continue
-        contents.append(
-            types.Content(role=role, parts=[types.Part.from_text(text=text)])
+    if not check_rate_limit(client_ip):
+        log_analytics_entry("/api/chat", 429, 0.0, 0, 0, client_ip)
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Too Many Requests. Rate limit exceeded (30 reqs/min). Please wait"
+                " a moment."
+            ),
         )
 
-      parts = []
-      if message:
-        parts.append(types.Part.from_text(text=message))
+    try:
+        chat_id = body.chat_id
+        message = body.message
+        history = body.history or []
+        file_payload = body.file
+        system_instruction = body.system_instruction or "You are a helpful assistant."
+        web_search = body.web_search
 
-      if file_payload and "data" in file_payload:
-        file_bytes, mime, name = decode_file(file_payload)
-        if mime.startswith("image/") or mime == "application/pdf":
-          parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime))
-        else:
-          try:
-            text_str = file_bytes.decode("utf-8")
-            parts.append(
-                types.Part.from_text(
-                    text=f"\n[Attached file: {name}]\n{text_str}"
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="GEMINI_API_KEY environment variable is not configured.",
+            )
+
+        if supabase and chat_id and message:
+            user_id = user.id if user and hasattr(user, "id") else None
+            db_payload = {
+                "chat_id": chat_id,
+                "role": "user",
+                "content": message,
+                "file_payload": file_payload,
+            }
+            if user_id:
+                db_payload["user_id"] = user_id
+            try:
+                supabase.table("messages").insert(db_payload).execute()
+            except Exception:
+                try:
+                    supabase.table("messages").insert({
+                        "chat_id": chat_id,
+                        "role": "user",
+                        "content": message,
+                        "file_payload": file_payload,
+                    }).execute()
+                except Exception as ex:
+                    print("Failed to save user message:", ex)
+
+            try:
+                title_snippet = (
+                    message[:30] + "..." if len(message) > 30 else message
+                ) or "New Discussion"
+                supabase.table("chats").update(
+                    {"title": title_snippet, "updated_at": "now()"}
+                ).eq("id", chat_id).execute()
+            except Exception as ex:
+                print("Failed to update chat title:", ex)
+
+        prompt_tokens_est = estimate_tokens(message) + estimate_tokens(
+            system_instruction
+        )
+        for h in history:
+            prompt_tokens_est += estimate_tokens(h.get("content", ""))
+
+        headers = {
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        }
+
+        if SDK_MODE == "NEW":
+            client = genai.Client(api_key=api_key)
+            contents = []
+            for m in history:
+                text = (m.get("content") or "").strip()
+                role = m.get("role")
+                if not text or role not in ("user", "model"):
+                    continue
+                contents.append(
+                    types.Content(role=role, parts=[types.Part.from_text(text=text)])
                 )
+
+            parts = []
+            if message:
+                parts.append(types.Part.from_text(text=message))
+            if file_payload and "data" in file_payload:
+                file_bytes, mime, name = decode_file(file_payload)
+                if mime.startswith("image/") or mime == "application/pdf":
+                    parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime))
+                else:
+                    try:
+                        text_str = file_bytes.decode("utf-8")
+                        parts.append(
+                            types.Part.from_text(
+                                text=f"\n[Attached file: {name}]\n{text_str}"
+                            )
+                        )
+                    except Exception:
+                        pass
+
+            if not parts:
+                raise HTTPException(status_code=400, detail="Empty message.")
+
+            contents.append(types.Content(role="user", parts=parts))
+            tools = (
+                [types.Tool(google_search=types.GoogleSearch())]
+                if web_search
+                else None
             )
-          except Exception:
-            pass
-
-      if not parts:
-        raise HTTPException(status_code=400, detail="Empty message.")
-
-      contents.append(types.Content(role="user", parts=parts))
-
-      tools = (
-          [types.Tool(google_search=types.GoogleSearch())]
-          if web_search
-          else None
-      )
-      config = types.GenerateContentConfig(
-          system_instruction=system_instruction, tools=tools
-      )
-
-      def generate_stream():
-        max_retries = 3
-        backoff = 2
-        total_output_text = ""
-
-        for attempt in range(max_retries):
-          try:
-            response = client.models.generate_content_stream(
-                model=MODEL_NAME, contents=contents, config=config
-            )
-            for chunk in response:
-              if chunk.text:
-                total_output_text += chunk.text
-                yield chunk.text
-
-            comp_tokens = estimate_tokens(total_output_text)
-            latency_ms = (time.time() - start_time) * 1000
-            log_analytics_entry(
-                "/api/chat",
-                200,
-                latency_ms,
-                prompt_tokens_est,
-                comp_tokens,
-                client_ip,
+            config = types.GenerateContentConfig(
+                system_instruction=system_instruction, tools=tools
             )
 
-            if supabase and chat_id and total_output_text:
-              user_id = user.id if user and hasattr(user, "id") else None
-              model_payload = {
-                  "chat_id": chat_id,
-                  "role": "model",
-                  "content": total_output_text,
-              }
-              if user_id:
-                model_payload["user_id"] = user_id
+            def generate_stream():
+                max_retries = 3
+                backoff = 2
+                total_output_text = ""
+                for attempt in range(max_retries):
+                    try:
+                        response = client.models.generate_content_stream(
+                            model=MODEL_NAME, contents=contents, config=config
+                        )
+                        for chunk in response:
+                            if chunk.text:
+                                total_output_text += chunk.text
+                                yield chunk.text
+                        comp_tokens = estimate_tokens(total_output_text)
+                        latency_ms = (time.time() - start_time) * 1000
+                        log_analytics_entry(
+                            "/api/chat",
+                            200,
+                            latency_ms,
+                            prompt_tokens_est,
+                            comp_tokens,
+                            client_ip,
+                        )
 
-              try:
-                supabase.table("messages").insert(model_payload).execute()
-              except Exception:
-                try:
-                  supabase.table("messages").insert({
-                      "chat_id": chat_id,
-                      "role": "model",
-                      "content": total_output_text,
-                  }).execute()
-                except Exception as ex:
-                  print("Failed to save model message:", ex)
-            break
-          except Exception as ex:
-            err_msg = str(ex)
-            if ("429" in err_msg or "503" in err_msg) and attempt < (
-                max_retries - 1
-            ):
-              time.sleep(backoff)
-              backoff *= 2
-              continue
-            latency_ms = (time.time() - start_time) * 1000
-            status_code = 429 if "429" in err_msg else 500
-            log_analytics_entry(
-                "/api/chat", status_code, latency_ms, 0, 0, client_ip
+                        if supabase and chat_id and total_output_text:
+                            user_id = user.id if user and hasattr(user, "id") else None
+                            model_payload = {
+                                "chat_id": chat_id,
+                                "role": "model",
+                                "content": total_output_text,
+                            }
+                            if user_id:
+                                model_payload["user_id"] = user_id
+                            try:
+                                supabase.table("messages").insert(model_payload).execute()
+                            except Exception:
+                                try:
+                                    supabase.table("messages").insert({
+                                        "chat_id": chat_id,
+                                        "role": "model",
+                                        "content": total_output_text,
+                                    }).execute()
+                                except Exception as ex:
+                                    print("Failed to save model message:", ex)
+                        break
+                    except Exception as ex:
+                        err_msg = str(ex)
+                        if ("429" in err_msg or "503" in err_msg) and attempt < (
+                            max_retries - 1
+                        ):
+                            time.sleep(backoff)
+                            backoff *= 2
+                            continue
+                        latency_ms = (time.time() - start_time) * 1000
+                        status_code = 429 if "429" in err_msg else 500
+                        log_analytics_entry(
+                            "/api/chat", status_code, latency_ms, 0, 0, client_ip
+                        )
+                        yield f"\n\n⚠️ Error: {err_msg}"
+                        break
+
+            return StreamingResponse(
+                generate_stream(), media_type="text/event-stream", headers=headers
             )
-            yield f"\n\n⚠️ Error: {err_msg}"
-            break
-
-      return StreamingResponse(
-          generate_stream(), media_type="text/event-stream", headers=headers
-      )
-
-    else:
-      genai_legacy.configure(api_key=api_key)
-      model = genai_legacy.GenerativeModel(
-          MODEL_NAME, system_instruction=system_instruction
-      )
-
-      legacy_history = []
-      for m in history:
-        text = (m.get("content") or "").strip()
-        role = m.get("role")
-        if not text or role not in ("user", "model"):
-          continue
-        legacy_history.append({"role": role, "parts": [text]})
-
-      prompt_content = [message] if message else []
-      if file_payload and "data" in file_payload:
-        file_bytes, mime, name = decode_file(file_payload)
-        if mime.startswith("image/") or mime == "application/pdf":
-          prompt_content.append({"mime_type": mime, "data": file_bytes})
         else:
-          try:
-            text_str = file_bytes.decode("utf-8")
-            prompt_content.append(f"\n[Attached file: {name}]\n{text_str}")
-          except Exception:
-            pass
+            genai_legacy.configure(api_key=api_key)
+            model = genai_legacy.GenerativeModel(
+                MODEL_NAME, system_instruction=system_instruction
+            )
+            legacy_history = []
+            for m in history:
+                text = (m.get("content") or "").strip()
+                role = m.get("role")
+                if not text or role not in ("user", "model"):
+                    continue
+                legacy_history.append({"role": role, "parts": [text]})
 
-      if not prompt_content:
-        raise HTTPException(status_code=400, detail="Empty message.")
+            prompt_content = [message] if message else []
+            if file_payload and "data" in file_payload:
+                file_bytes, mime, name = decode_file(file_payload)
+                if mime.startswith("image/") or mime == "application/pdf":
+                    prompt_content.append({"mime_type": mime, "data": file_bytes})
+                else:
+                    try:
+                        text_str = file_bytes.decode("utf-8")
+                        prompt_content.append(f"\n[Attached file: {name}]\n{text_str}")
+                    except Exception:
+                        pass
 
-      chat_session = model.start_chat(history=legacy_history)
+            if not prompt_content:
+                raise HTTPException(status_code=400, detail="Empty message.")
 
-      def generate_legacy():
-        max_retries = 3
-        backoff = 2
-        total_output_text = ""
+            chat_session = model.start_chat(history=legacy_history)
 
-        for attempt in range(max_retries):
-          try:
-            res = chat_session.send_message(prompt_content, stream=True)
-            for chunk in res:
-              if chunk.text:
-                total_output_text += chunk.text
-                yield chunk.text
+            def generate_legacy():
+                max_retries = 3
+                backoff = 2
+                total_output_text = ""
+                for attempt in range(max_retries):
+                    try:
+                        res = chat_session.send_message(prompt_content, stream=True)
+                        for chunk in res:
+                            if chunk.text:
+                                total_output_text += chunk.text
+                                yield chunk.text
+                        comp_tokens = estimate_tokens(total_output_text)
+                        latency_ms = (time.time() - start_time) * 1000
+                        log_analytics_entry(
+                            "/api/chat",
+                            200,
+                            latency_ms,
+                            prompt_tokens_est,
+                            comp_tokens,
+                            client_ip,
+                        )
 
-            comp_tokens = estimate_tokens(total_output_text)
-            latency_ms = (time.time() - start_time) * 1000
-            log_analytics_entry(
-                "/api/chat",
-                200,
-                latency_ms,
-                prompt_tokens_est,
-                comp_tokens,
-                client_ip,
+                        if supabase and chat_id and total_output_text:
+                            user_id = user.id if user and hasattr(user, "id") else None
+                            model_payload = {
+                                "chat_id": chat_id,
+                                "role": "model",
+                                "content": total_output_text,
+                            }
+                            if user_id:
+                                model_payload["user_id"] = user_id
+                            try:
+                                supabase.table("messages").insert(model_payload).execute()
+                            except Exception:
+                                try:
+                                    supabase.table("messages").insert({
+                                        "chat_id": chat_id,
+                                        "role": "model",
+                                        "content": total_output_text,
+                                    }).execute()
+                                except Exception as ex:
+                                    print("Failed to save model message:", ex)
+                        break
+                    except Exception as ex:
+                        err_msg = str(ex)
+                        if ("429" in err_msg or "503" in err_msg) and attempt < (
+                            max_retries - 1
+                        ):
+                            time.sleep(backoff)
+                            backoff *= 2
+                            continue
+                        latency_ms = (time.time() - start_time) * 1000
+                        status_code = 429 if "429" in err_msg else 500
+                        log_analytics_entry(
+                            "/api/chat", status_code, latency_ms, 0, 0, client_ip
+                        )
+                        yield f"\n\n⚠️ Error: {err_msg}"
+                        break
+
+            return StreamingResponse(
+                generate_legacy(), media_type="text/event-stream", headers=headers
             )
 
-            if supabase and chat_id and total_output_text:
-              user_id = user.id if user and hasattr(user, "id") else None
-              model_payload = {
-                  "chat_id": chat_id,
-                  "role": "model",
-                  "content": total_output_text,
-              }
-              if user_id:
-                model_payload["user_id"] = user_id
-
-              try:
-                supabase.table("messages").insert(model_payload).execute()
-              except Exception:
-                try:
-                  supabase.table("messages").insert({
-                      "chat_id": chat_id,
-                      "role": "model",
-                      "content": total_output_text,
-                  }).execute()
-                except Exception as ex:
-                  print("Failed to save model message:", ex)
-            break
-          except Exception as ex:
-            err_msg = str(ex)
-            if ("429" in err_msg or "503" in err_msg) and attempt < (
-                max_retries - 1
-            ):
-              time.sleep(backoff)
-              backoff *= 2
-              continue
-            latency_ms = (time.time() - start_time) * 1000
-            status_code = 429 if "429" in err_msg else 500
-            log_analytics_entry(
-                "/api/chat", status_code, latency_ms, 0, 0, client_ip
-            )
-            yield f"\n\n⚠️ Error: {err_msg}"
-            break
-
-      return StreamingResponse(
-          generate_legacy(), media_type="text/event-stream", headers=headers
-      )
-
-  except HTTPException:
-    raise
-  except Exception as e:
-    raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
