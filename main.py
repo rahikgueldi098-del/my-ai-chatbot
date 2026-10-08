@@ -61,22 +61,43 @@ def get_gemini_client(api_key: str):
     return _gemini_client
 
 
-# --- Authentication Dependency (with a short cache) ---
-# supabase.auth.get_user() is a network call. We cache the result for a few
-# minutes so it does not slow down every single message.
+# --- Authentication (Supabase Auth) ---
+# Every /api/* route (except /api/auth/*) requires a logged-in user.
+# Each request gets its own Supabase client carrying the USER's token, so
+# Row-Level Security (RLS) is enforced by the database itself.
+# NOTE: SUPABASE_KEY must be the "anon" (public) key, NOT the service_role key,
+# otherwise RLS is bypassed.
 AUTH_CACHE_TTL_SEC = 300
 _auth_cache: Dict[str, Any] = {}
 _auth_lock = threading.Lock()
+ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ADMIN_EMAILS", "").split(",")
+    if e.strip()
+}
 
 
-def get_current_user(
-    authorization: Optional[str] = Header(None),
-) -> Optional[Any]:
-    if not authorization or not authorization.startswith("Bearer "):
-        return None
-    token = authorization.split(" ", 1)[1]
+class AuthUser:
+    def __init__(self, user: Any, token: str):
+        self.id = str(user.id)
+        self.email = getattr(user, "email", None)
+        self.token = token
+        # Client acting as this user -> RLS applies to every query.
+        self.db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        self.db.postgrest.auth(token)
+
+
+def require_user(authorization: Optional[str] = Header(None)) -> AuthUser:
     if not supabase:
-        return None
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase is not configured (SUPABASE_URL / SUPABASE_KEY).",
+        )
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
 
     now = time.time()
     with _auth_lock:
@@ -87,18 +108,31 @@ def get_current_user(
     try:
         user_response = supabase.auth.get_user(token)
         if not user_response or not user_response.user:
-            return None
-        with _auth_lock:
-            if len(_auth_cache) > 500:
-                _auth_cache.clear()
-            _auth_cache[token] = (now, user_response.user)
-        return user_response.user
+            raise HTTPException(status_code=401, detail="Invalid or expired session.")
+        auth_user = AuthUser(user_response.user, token)
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Authentication error: {e}")
-        return None
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+
+    with _auth_lock:
+        if len(_auth_cache) > 500:
+            _auth_cache.clear()
+        _auth_cache[token] = (now, auth_user)
+    return auth_user
 
 
 # --- Request Models ---
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 class EnhanceRequest(BaseModel):
     prompt: str = ""
 
@@ -216,14 +250,13 @@ def decode_file(file_payload: dict):
 
 # --- Database helpers (run in background threads) ---
 def save_message(
+    db: Client,
     chat_id: str,
     role: str,
     content: str,
     file_payload: Optional[dict] = None,
     user_id: Optional[str] = None,
 ):
-    if not supabase:
-        return
     payload = {"chat_id": chat_id, "role": role, "content": content}
     if file_payload is not None:
         payload["file_payload"] = file_payload
@@ -231,28 +264,29 @@ def save_message(
         row = dict(payload)
         if user_id:
             row["user_id"] = user_id
-        supabase.table("messages").insert(row).execute()
+        db.table("messages").insert(row).execute()
     except Exception:
         try:
-            supabase.table("messages").insert(payload).execute()
+            db.table("messages").insert(payload).execute()
         except Exception as ex:
             print(f"Failed to save {role} message:", ex)
 
 
 def save_user_turn(
+    db: Client,
     chat_id: str,
     message: str,
     file_payload: Optional[dict],
-    user_id: Optional[str],
+    user_id: str,
 ):
-    save_message(chat_id, "user", message, file_payload, user_id)
+    save_message(db, chat_id, "user", message, file_payload, user_id)
     try:
         title_snippet = (
             message[:30] + "..." if len(message) > 30 else message
         ) or "New Discussion"
-        supabase.table("chats").update(
+        db.table("chats").update(
             {"title": title_snippet, "updated_at": "now()"}
-        ).eq("id", chat_id).execute()
+        ).eq("id", chat_id).eq("user_id", user_id).execute()
     except Exception as ex:
         print("Failed to update chat title:", ex)
 
@@ -365,6 +399,13 @@ header { padding: 10px; flex-wrap: wrap; }
 #send-btn { height: 40px; min-width: 60px; padding: 0 14px; }
 #user-input { min-height: 40px; padding: 9px 14px; }
 }
+.auth-input { width: 100%; padding: 12px 14px; border-radius: 8px; border: 1px solid #424242; background: #2f2f2f; color: #fff; font-size: 1rem; outline: none; }
+#auth-msg { font-size: 0.85rem; min-height: 1.2em; }
+#auth-msg.err { color: #f87171; }
+#auth-msg.ok { color: #4ade80; }
+#auth-submit { background: #fff; color: #000; border: none; border-radius: 8px; padding: 12px; font-weight: 600; cursor: pointer; font-size: 1rem; }
+#auth-switch { color: #38bdf8; font-size: 0.85rem; text-align: center; cursor: pointer; text-decoration: none; }
+#user-email { text-transform: none; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -373,6 +414,10 @@ header { padding: 10px; flex-wrap: wrap; }
 <button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
 <input type="text" id="chat-search" placeholder="Search chats..." oninput="renderSidebar()">
 <div id="history-list"></div>
+<div class="export-box">
+<span class="export-title" id="user-email"></span>
+<button class="export-btn" onclick="logout()">Log out</button>
+</div>
 <div class="export-box">
 <span class="export-title">Export Chat</span>
 <div class="export-buttons">
@@ -422,6 +467,16 @@ header { padding: 10px; flex-wrap: wrap; }
 <textarea id="user-input" placeholder="Ask AI Assistant... (Shift + Enter for new line)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
 <button id="send-btn" onclick="handleSendOrStop()">Send</button>
 </div>
+</div>
+</div>
+<div id="auth-modal" class="modal-overlay" style="z-index:200;">
+<div class="modal-content" style="max-width:380px;">
+<div class="modal-title" id="auth-title">🔐 Log in</div>
+<input id="auth-email" class="auth-input" type="email" placeholder="Email" autocomplete="email">
+<input id="auth-password" class="auth-input" type="password" placeholder="Password (min 6 characters)" autocomplete="current-password" onkeydown="if(event.key==='Enter') submitAuth()">
+<div id="auth-msg"></div>
+<button id="auth-submit" onclick="submitAuth()">Log in</button>
+<a id="auth-switch" href="#" onclick="toggleAuthMode(); return false;">No account? Sign up</a>
 </div>
 </div>
 <div id="analytics-modal" class="modal-overlay" onclick="if(event.target===this) closeAnalyticsModal()">
@@ -493,6 +548,126 @@ return window.hljs ? window.hljs.highlightAuto(code).value : code;
 breaks: true
 });
 }
+const _origFetch = window.fetch.bind(window);
+let authMode = 'login';
+let _refreshing = null;
+function saveSession(d) {
+  try {
+    localStorage.setItem('supabase_token', d.access_token || '');
+    if (d.refresh_token) localStorage.setItem('supabase_refresh', d.refresh_token);
+    if (d.email) localStorage.setItem('supabase_email', d.email);
+  } catch (e) {}
+  updateUserBox();
+}
+function updateUserBox() {
+  const el = document.getElementById('user-email');
+  if (el) el.textContent = localStorage.getItem('supabase_email') || '';
+}
+function showAuth(msg) {
+  const m = document.getElementById('auth-modal');
+  if (m) m.classList.add('open');
+  if (msg) setAuthMsg(msg, 'err');
+}
+function hideAuth() {
+  const m = document.getElementById('auth-modal');
+  if (m) m.classList.remove('open');
+}
+function setAuthMsg(text, kind) {
+  const el = document.getElementById('auth-msg');
+  el.textContent = text || '';
+  el.className = kind || '';
+}
+function setAuthMode(mode) {
+  authMode = mode;
+  const login = mode === 'login';
+  document.getElementById('auth-title').textContent = login ? '🔐 Log in' : '📝 Create account';
+  document.getElementById('auth-submit').textContent = login ? 'Log in' : 'Sign up';
+  document.getElementById('auth-switch').textContent = login ? 'No account? Sign up' : 'Already have an account? Log in';
+  document.getElementById('auth-password').autocomplete = login ? 'current-password' : 'new-password';
+}
+function toggleAuthMode() {
+  setAuthMode(authMode === 'login' ? 'signup' : 'login');
+  setAuthMsg('', '');
+}
+async function submitAuth() {
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  if (!email || !password) { setAuthMsg('Enter your email and password.', 'err'); return; }
+  const btn = document.getElementById('auth-submit');
+  btn.disabled = true;
+  setAuthMsg('Please wait...', '');
+  try {
+    const r = await _origFetch('/api/auth/' + (authMode === 'login' ? 'login' : 'signup'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { setAuthMsg(d.detail || ('Error ' + r.status), 'err'); return; }
+    if (d.needs_confirmation) {
+      setAuthMode('login');
+      setAuthMsg('Account created. Check your email to confirm it, then log in.', 'ok');
+      return;
+    }
+    saveSession(d);
+    document.getElementById('auth-password').value = '';
+    setAuthMsg('', '');
+    hideAuth();
+    chats = [];
+    currentHistory = [];
+    currentChatId = null;
+    await initStorage();
+  } catch (e) {
+    setAuthMsg('Network error. Try again.', 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+function logout() {
+  try {
+    localStorage.removeItem('supabase_token');
+    localStorage.removeItem('supabase_refresh');
+    localStorage.removeItem('supabase_email');
+  } catch (e) {}
+  location.reload();
+}
+async function tryRefresh() {
+  const rt = localStorage.getItem('supabase_refresh');
+  if (!rt) return false;
+  if (!_refreshing) {
+    _refreshing = (async () => {
+      try {
+        const r = await _origFetch('/api/auth/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: rt })
+        });
+        if (!r.ok) return false;
+        saveSession(await r.json());
+        return true;
+      } catch (e) { return false; }
+      finally { setTimeout(() => { _refreshing = null; }, 0); }
+    })();
+  }
+  return _refreshing;
+}
+// Every /api call: if the server says 401, try to refresh the session once,
+// otherwise show the login screen.
+window.fetch = async function(url, opts) {
+  opts = opts || {};
+  let res = await _origFetch(url, opts);
+  const u = String(url);
+  if (res.status === 401 && u.startsWith('/api/') && !u.startsWith('/api/auth/')) {
+    if (await tryRefresh()) {
+      opts = Object.assign({}, opts, {
+        headers: Object.assign({}, opts.headers, { 'Authorization': 'Bearer ' + localStorage.getItem('supabase_token') })
+      });
+      res = await _origFetch(url, opts);
+    }
+    if (res.status === 401) showAuth('Please log in to continue.');
+  }
+  return res;
+};
 function getAuthHeaders() {
 const headers = { 'Content-Type': 'application/json' };
 const token = localStorage.getItem('supabase_token');
@@ -502,8 +677,10 @@ headers['Authorization'] = `Bearer ${token}`;
 return headers;
 }
 async function initStorage() {
+if (!localStorage.getItem('supabase_token')) { showAuth(); return; }
 try {
 const res = await fetch('/api/chats', { headers: getAuthHeaders() });
+if (res.status === 401) return;
 if (res.ok) {
 chats = await res.json();
 } else {
@@ -954,7 +1131,7 @@ html += `<tr>
 tableBody.innerHTML = html;
 } catch (e) {}
 }
-window.addEventListener('DOMContentLoaded', initStorage);
+window.addEventListener('DOMContentLoaded', () => { updateUserBox(); initStorage(); });
 </script>
 </body>
 </html>"""
@@ -965,57 +1142,121 @@ def serve_gui():
     return HTML_CONTENT
 
 
-@app.get("/api/chats")
-def get_chats(user: Any = Depends(get_current_user)):
+# --- Auth routes (no token needed) ---
+def _auth_client() -> Client:
+    # A fresh client per call so one user's session never leaks into another's.
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def _session_payload(res: Any) -> Dict[str, Any]:
+    session = getattr(res, "session", None)
+    user = getattr(res, "user", None)
+    return {
+        "access_token": session.access_token,
+        "refresh_token": session.refresh_token,
+        "email": getattr(user, "email", None),
+    }
+
+
+@app.post("/api/auth/signup")
+def auth_signup(body: AuthRequest, request: Request):
     if not supabase:
-        return JSONResponse([])
+        return JSONResponse({"detail": "Supabase is not configured."}, status_code=503)
+    if not check_rate_limit(get_client_ip(request)):
+        return JSONResponse({"detail": "Too many attempts. Wait a minute."}, status_code=429)
+    email = body.email.strip().lower()
+    if "@" not in email or len(body.password) < 6:
+        return JSONResponse(
+            {"detail": "Enter a valid email and a password of at least 6 characters."},
+            status_code=400,
+        )
     try:
-        query = supabase.table("chats").select("*")
-        if user and hasattr(user, "id"):
-            query = query.eq("user_id", user.id)
-        res = query.order("updated_at", desc=True).execute()
+        res = _auth_client().auth.sign_up({"email": email, "password": body.password})
+        if not getattr(res, "session", None):
+            # Email confirmation is enabled in Supabase: user must confirm first.
+            return JSONResponse({"needs_confirmation": True, "email": email})
+        return JSONResponse(_session_payload(res))
+    except Exception as e:
+        return JSONResponse({"detail": str(e)}, status_code=400)
+
+
+@app.post("/api/auth/login")
+def auth_login(body: AuthRequest, request: Request):
+    if not supabase:
+        return JSONResponse({"detail": "Supabase is not configured."}, status_code=503)
+    if not check_rate_limit(get_client_ip(request)):
+        return JSONResponse({"detail": "Too many attempts. Wait a minute."}, status_code=429)
+    try:
+        res = _auth_client().auth.sign_in_with_password(
+            {"email": body.email.strip().lower(), "password": body.password}
+        )
+        return JSONResponse(_session_payload(res))
+    except Exception as e:
+        return JSONResponse({"detail": str(e)}, status_code=400)
+
+
+@app.post("/api/auth/refresh")
+def auth_refresh(body: RefreshRequest):
+    if not supabase:
+        return JSONResponse({"detail": "Supabase is not configured."}, status_code=503)
+    try:
+        res = _auth_client().auth.refresh_session(body.refresh_token)
+        return JSONResponse(_session_payload(res))
+    except Exception as e:
+        return JSONResponse({"detail": str(e)}, status_code=401)
+
+
+# --- Chat routes (login required, filtered per user) ---
+@app.get("/api/chats")
+def get_chats(user: AuthUser = Depends(require_user)):
+    try:
+        res = (
+            user.db.table("chats")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("updated_at", desc=True)
+            .execute()
+        )
         return JSONResponse(res.data or [])
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/chats")
-def create_chat(
-    body: CreateChatRequest, user: Any = Depends(get_current_user)
-):
+def create_chat(body: CreateChatRequest, user: AuthUser = Depends(require_user)):
     chat_id = f"chat_{int(time.time() * 1000)}"
     title = body.title or "New Discussion"
-    if supabase:
-        payload = {"id": chat_id, "title": title}
-        if user and hasattr(user, "id"):
-            payload["user_id"] = user.id
-        try:
-            res = supabase.table("chats").insert(payload).execute()
-            return JSONResponse(
-                res.data[0] if res.data else {"id": chat_id, "title": title}
-            )
-        except Exception:
-            try:
-                res = (
-                    supabase.table("chats")
-                    .insert({"id": chat_id, "title": title})
-                    .execute()
-                )
-                return JSONResponse(
-                    res.data[0] if res.data else {"id": chat_id, "title": title}
-                )
-            except Exception as e:
-                return JSONResponse({"error": str(e)}, status_code=500)
-    return JSONResponse({"id": chat_id, "title": title})
+    try:
+        res = (
+            user.db.table("chats")
+            .insert({"id": chat_id, "title": title, "user_id": user.id})
+            .execute()
+        )
+        return JSONResponse(
+            res.data[0] if res.data else {"id": chat_id, "title": title}
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _owns_chat(user: AuthUser, chat_id: str) -> bool:
+    res = (
+        user.db.table("chats")
+        .select("id")
+        .eq("id", chat_id)
+        .eq("user_id", user.id)
+        .execute()
+    )
+    return bool(res.data)
 
 
 @app.get("/api/chats/{chat_id}/messages")
-def get_messages(chat_id: str, user: Any = Depends(get_current_user)):
-    if not supabase:
-        return JSONResponse([])
+def get_messages(chat_id: str, user: AuthUser = Depends(require_user)):
     try:
+        if not _owns_chat(user, chat_id):
+            return JSONResponse({"detail": "Chat not found."}, status_code=404)
         res = (
-            supabase.table("messages")
+            user.db.table("messages")
             .select("*")
             .eq("chat_id", chat_id)
             .order("created_at", desc=False)
@@ -1027,17 +1268,24 @@ def get_messages(chat_id: str, user: Any = Depends(get_current_user)):
 
 
 @app.delete("/api/chats/{chat_id}")
-def delete_chat(chat_id: str, user: Any = Depends(get_current_user)):
-    if supabase:
-        try:
-            supabase.table("chats").delete().eq("id", chat_id).execute()
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+def delete_chat(chat_id: str, user: AuthUser = Depends(require_user)):
+    try:
+        if not _owns_chat(user, chat_id):
+            return JSONResponse({"detail": "Chat not found."}, status_code=404)
+        user.db.table("messages").delete().eq("chat_id", chat_id).execute()
+        user.db.table("chats").delete().eq("id", chat_id).eq(
+            "user_id", user.id
+        ).execute()
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
     return JSONResponse({"status": "deleted"})
 
 
 @app.get("/api/admin/stats")
-def get_admin_stats(request: Request):
+def get_admin_stats(request: Request, user: AuthUser = Depends(require_user)):
+    # If ADMIN_EMAILS is set (comma-separated), only those users may see stats.
+    if ADMIN_EMAILS and (user.email or "").lower() not in ADMIN_EMAILS:
+        raise HTTPException(status_code=403, detail="Admins only.")
     latencies = analytics_store["latency_ms_history"]
     avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
     return JSONResponse({
@@ -1057,7 +1305,7 @@ def get_admin_stats(request: Request):
 def enhance_prompt(
     body: EnhanceRequest,
     request: Request,
-    user: Any = Depends(get_current_user),
+    user: AuthUser = Depends(require_user),
 ):
     start_time = time.time()
     client_ip = get_client_ip(request)
@@ -1132,7 +1380,7 @@ def build_config(system_instruction: str, tools, use_thinking: bool):
 def chat_endpoint(
     body: ChatRequest,
     request: Request,
-    user: Any = Depends(get_current_user),
+    user: AuthUser = Depends(require_user),
 ):
     start_time = time.time()
     client_ip = get_client_ip(request)
@@ -1163,13 +1411,13 @@ def chat_endpoint(
                 detail="GEMINI_API_KEY environment variable is not configured.",
             )
 
-        user_id = user.id if user and hasattr(user, "id") else None
+        user_id = user.id
 
         # Save the user message in the background: Gemini starts immediately.
         save_future = None
-        if supabase and chat_id and message:
+        if chat_id and message:
             save_future = _executor.submit(
-                save_user_turn, chat_id, message, file_payload, user_id
+                save_user_turn, user.db, chat_id, message, file_payload, user_id
             )
 
         prompt_tokens_est = estimate_tokens(message) + estimate_tokens(
@@ -1292,7 +1540,7 @@ def chat_endpoint(
                         estimate_tokens(total_output_text),
                         client_ip,
                     )
-                    if supabase and chat_id and total_output_text:
+                    if chat_id and total_output_text:
                         # Keep order: user message first, then the answer.
                         if save_future is not None:
                             try:
@@ -1300,7 +1548,7 @@ def chat_endpoint(
                             except Exception:
                                 pass
                         save_message(
-                            chat_id, "model", total_output_text, None, user_id
+                            user.db, chat_id, "model", total_output_text, None, user_id
                         )
                     return
                 except Exception as ex:
