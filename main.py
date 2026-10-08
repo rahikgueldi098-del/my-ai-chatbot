@@ -4,7 +4,8 @@ import json
 import os
 import time
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, HTTPException, Request
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from supabase import Client, create_client
@@ -19,8 +20,10 @@ except ImportError:
 
   SDK_MODE = "LEGACY"
 
-MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").replace("/rest/v1/", "").strip("/")
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+SUPABASE_URL = (
+    os.environ.get("SUPABASE_URL", "").replace("/rest/v1/", "").strip("/")
+)
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 supabase: Optional[Client] = None
@@ -33,6 +36,26 @@ if SUPABASE_URL and SUPABASE_KEY:
 app = FastAPI(title="AI Assistant Studio Pro")
 
 
+# --- Authentication Dependency ---
+def get_current_user(
+    authorization: Optional[str] = Header(None),
+) -> Optional[Any]:
+  if not authorization or not authorization.startswith("Bearer "):
+    return None
+  token = authorization.split(" ")[1]
+  if not supabase:
+    return None
+  try:
+    user_response = supabase.auth.get_user(token)
+    if not user_response or not user_response.user:
+      return None
+    return user_response.user
+  except Exception as e:
+    print(f"Authentication error: {e}")
+    return None
+
+
+# --- Request Models ---
 class EnhanceRequest(BaseModel):
   prompt: str = ""
 
@@ -50,6 +73,7 @@ class ChatRequest(BaseModel):
   web_search: bool = True
 
 
+# --- Rate Limiting & Analytics ---
 RATE_LIMIT_WINDOW_SEC = 60
 MAX_REQUESTS_PER_WINDOW = 30
 ip_request_history = collections.defaultdict(list)
@@ -108,12 +132,14 @@ def log_analytics_entry(
     analytics_store["total_failed"] += 1
   else:
     analytics_store["total_failed"] += 1
+
   analytics_store["total_prompt_tokens"] += prompt_tokens
   analytics_store["total_completion_tokens"] += completion_tokens
   analytics_store["total_cost_usd"] += cost
   analytics_store["latency_ms_history"].append(latency_ms)
   if len(analytics_store["latency_ms_history"]) > 200:
     analytics_store["latency_ms_history"].pop(0)
+
   log_entry = {
       "time": time.strftime("%H:%M:%S"),
       "endpoint": endpoint,
@@ -304,7 +330,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       </div>
     </div>
   </div>
-
   <div id="analytics-modal" class="modal-overlay" onclick="if(event.target===this) closeAnalyticsModal()">
     <div class="modal-content">
       <div class="modal-header">
@@ -353,7 +378,6 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       </div>
     </div>
   </div>
-
   <script>
     let chats = [];
     let currentChatId = null;
@@ -365,9 +389,18 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     let isStreaming = false;
     let activeAbortController = null;
 
+    function getAuthHeaders() {
+      const headers = { 'Content-Type': 'application/json' };
+      const token = localStorage.getItem('supabase_token');
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      return headers;
+    }
+
     async function initStorage() {
       try {
-        const res = await fetch('/api/chats');
+        const res = await fetch('/api/chats', { headers: getAuthHeaders() });
         if (res.ok) {
           chats = await res.json();
         } else {
@@ -409,7 +442,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       try {
         const res = await fetch('/api/chats', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders(),
           body: JSON.stringify({ title: 'New Discussion' })
         });
         const newChat = await res.json();
@@ -427,7 +460,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     async function loadChat(id) {
       currentChatId = id;
       try {
-        const res = await fetch(`/api/chats/${id}/messages`);
+        const res = await fetch(`/api/chats/${id}/messages`, { headers: getAuthHeaders() });
         if (res.ok) {
           currentHistory = await res.json();
         } else {
@@ -444,7 +477,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     async function deleteChat(id, event) {
       if (event) event.stopPropagation();
       try {
-        await fetch(`/api/chats/${id}`, { method: 'DELETE' });
+        await fetch(`/api/chats/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
         chats = chats.filter(c => c.id !== id);
         if (chats.length === 0) {
           await startNewChat();
@@ -667,7 +700,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       try {
         const res = await fetch('/api/enhance-prompt', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders(),
           body: JSON.stringify({ prompt: text })
         });
         const data = await res.json();
@@ -744,7 +777,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders(),
           signal: activeAbortController.signal,
           body: JSON.stringify({
             chat_id: currentChatId,
@@ -765,6 +798,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
+
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -828,20 +862,18 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
     async function fetchAnalyticsStats() {
       try {
-        const res = await fetch('/api/admin/stats');
+        const res = await fetch('/api/admin/stats', { headers: getAuthHeaders() });
         if (!res.ok) return;
         const data = await res.json();
         document.getElementById('stat-reqs').innerText = `${data.total_successful}/${data.total_requests}`;
         document.getElementById('stat-cost').innerText = `$${data.total_cost_usd.toFixed(5)}`;
         document.getElementById('stat-tokens').innerText = (data.total_prompt_tokens + data.total_completion_tokens).toLocaleString();
         document.getElementById('stat-latency').innerText = `${data.avg_latency_ms.toFixed(0)}ms`;
-
         const tableBody = document.getElementById('log-table-body');
         if (!data.recent_logs || data.recent_logs.length === 0) {
           tableBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #666;">No logs recorded yet.</td></tr>';
           return;
         }
-
         let html = '';
         data.recent_logs.forEach(log => {
           const statusClass = log.status === 200 ? 'status-200' : 'status-429';
@@ -870,42 +902,51 @@ def serve_gui():
 
 
 @app.get("/api/chats")
-def get_chats():
+def get_chats(user: Any = Depends(get_current_user)):
   if not supabase:
     return JSONResponse([])
   try:
-    res = (
-        supabase.table("chats")
-        .select("*")
-        .order("updated_at", desc=True)
-        .execute()
-    )
+    query = supabase.table("chats").select("*")
+    if user and hasattr(user, "id"):
+      query = query.eq("user_id", user.id)
+    res = query.order("updated_at", desc=True).execute()
     return JSONResponse(res.data or [])
   except Exception as e:
     return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/chats")
-def create_chat(body: CreateChatRequest):
-  chat_id = f"chat_{int(time.time()*1000)}"
+def create_chat(
+    body: CreateChatRequest, user: Any = Depends(get_current_user)
+):
+  chat_id = f"chat_{int(time.time() * 1000)}"
   title = body.title or "New Discussion"
   if supabase:
+    payload = {"id": chat_id, "title": title}
+    if user and hasattr(user, "id"):
+      payload["user_id"] = user.id
     try:
-      res = (
-          supabase.table("chats")
-          .insert({"id": chat_id, "title": title})
-          .execute()
-      )
+      res = supabase.table("chats").insert(payload).execute()
       return JSONResponse(
           res.data[0] if res.data else {"id": chat_id, "title": title}
       )
-    except Exception as e:
-      return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception:
+      try:
+        res = (
+            supabase.table("chats")
+            .insert({"id": chat_id, "title": title})
+            .execute()
+        )
+        return JSONResponse(
+            res.data[0] if res.data else {"id": chat_id, "title": title}
+        )
+      except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
   return JSONResponse({"id": chat_id, "title": title})
 
 
 @app.get("/api/chats/{chat_id}/messages")
-def get_messages(chat_id: str):
+def get_messages(chat_id: str, user: Any = Depends(get_current_user)):
   if not supabase:
     return JSONResponse([])
   try:
@@ -922,7 +963,7 @@ def get_messages(chat_id: str):
 
 
 @app.delete("/api/chats/{chat_id}")
-def delete_chat(chat_id: str):
+def delete_chat(chat_id: str, user: Any = Depends(get_current_user)):
   if supabase:
     try:
       supabase.table("chats").delete().eq("id", chat_id).execute()
@@ -949,7 +990,11 @@ def get_admin_stats(request: Request):
 
 
 @app.post("/api/enhance-prompt")
-def enhance_prompt(body: EnhanceRequest, request: Request):
+def enhance_prompt(
+    body: EnhanceRequest,
+    request: Request,
+    user: Any = Depends(get_current_user),
+):
   start_time = time.time()
   client_ip = request.client.host if request.client else "127.0.0.1"
   if not check_rate_limit(client_ip):
@@ -995,6 +1040,7 @@ def enhance_prompt(body: EnhanceRequest, request: Request):
         "/api/enhance-prompt", 200, latency_ms, p_tokens, c_tokens, client_ip
     )
     return JSONResponse({"enhanced_prompt": enhanced})
+
   except Exception as e:
     latency_ms = (time.time() - start_time) * 1000
     log_analytics_entry(
@@ -1004,7 +1050,11 @@ def enhance_prompt(body: EnhanceRequest, request: Request):
 
 
 @app.post("/api/chat")
-def chat_endpoint(body: ChatRequest, request: Request):
+def chat_endpoint(
+    body: ChatRequest,
+    request: Request,
+    user: Any = Depends(get_current_user),
+):
   start_time = time.time()
   client_ip = request.client.host if request.client else "127.0.0.1"
 
@@ -1033,16 +1083,31 @@ def chat_endpoint(body: ChatRequest, request: Request):
           detail="GEMINI_API_KEY environment variable is not configured.",
       )
 
-    # Sauvegarde du message utilisateur dans Supabase
     if supabase and chat_id and message:
+      user_id = user.id if user and hasattr(user, "id") else None
+      db_payload = {
+          "chat_id": chat_id,
+          "role": "user",
+          "content": message,
+          "file_payload": file_payload,
+      }
+      if user_id:
+        db_payload["user_id"] = user_id
+
       try:
-        supabase.table("messages").insert({
-            "chat_id": chat_id,
-            "role": "user",
-            "content": message,
-            "file_payload": file_payload,
-        }).execute()
-        # Mettre à jour le titre du chat s'il s'agit du premier message
+        supabase.table("messages").insert(db_payload).execute()
+      except Exception:
+        try:
+          supabase.table("messages").insert({
+              "chat_id": chat_id,
+              "role": "user",
+              "content": message,
+              "file_payload": file_payload,
+          }).execute()
+        except Exception as ex:
+          print("Failed to save user message:", ex)
+
+      try:
         title_snippet = (
             message[:30] + "..." if len(message) > 30 else message
         ) or "New Discussion"
@@ -1050,7 +1115,7 @@ def chat_endpoint(body: ChatRequest, request: Request):
             {"title": title_snippet, "updated_at": "now()"}
         ).eq("id", chat_id).execute()
       except Exception as ex:
-        print("Failed to save user message:", ex)
+        print("Failed to update chat title:", ex)
 
     prompt_tokens_est = estimate_tokens(message) + estimate_tokens(
         system_instruction
@@ -1079,12 +1144,11 @@ def chat_endpoint(body: ChatRequest, request: Request):
       parts = []
       if message:
         parts.append(types.Part.from_text(text=message))
+
       if file_payload and "data" in file_payload:
         file_bytes, mime, name = decode_file(file_payload)
         if mime.startswith("image/") or mime == "application/pdf":
-          parts.append(
-              types.Part.from_bytes(data=file_bytes, mime_type=mime)
-          )
+          parts.append(types.Part.from_bytes(data=file_bytes, mime_type=mime))
         else:
           try:
             text_str = file_bytes.decode("utf-8")
@@ -1100,6 +1164,7 @@ def chat_endpoint(body: ChatRequest, request: Request):
         raise HTTPException(status_code=400, detail="Empty message.")
 
       contents.append(types.Content(role="user", parts=parts))
+
       tools = (
           [types.Tool(google_search=types.GoogleSearch())]
           if web_search
@@ -1113,6 +1178,7 @@ def chat_endpoint(body: ChatRequest, request: Request):
         max_retries = 3
         backoff = 2
         total_output_text = ""
+
         for attempt in range(max_retries):
           try:
             response = client.models.generate_content_stream(
@@ -1134,17 +1200,27 @@ def chat_endpoint(body: ChatRequest, request: Request):
                 client_ip,
             )
 
-            # Sauvegarder la réponse de l'IA dans Supabase
             if supabase and chat_id and total_output_text:
-              try:
-                supabase.table("messages").insert({
-                    "chat_id": chat_id,
-                    "role": "model",
-                    "content": total_output_text,
-                }).execute()
-              except Exception as ex:
-                print("Failed to save model message:", ex)
+              user_id = user.id if user and hasattr(user, "id") else None
+              model_payload = {
+                  "chat_id": chat_id,
+                  "role": "model",
+                  "content": total_output_text,
+              }
+              if user_id:
+                model_payload["user_id"] = user_id
 
+              try:
+                supabase.table("messages").insert(model_payload).execute()
+              except Exception:
+                try:
+                  supabase.table("messages").insert({
+                      "chat_id": chat_id,
+                      "role": "model",
+                      "content": total_output_text,
+                  }).execute()
+                except Exception as ex:
+                  print("Failed to save model message:", ex)
             break
           except Exception as ex:
             err_msg = str(ex)
@@ -1171,6 +1247,7 @@ def chat_endpoint(body: ChatRequest, request: Request):
       model = genai_legacy.GenerativeModel(
           MODEL_NAME, system_instruction=system_instruction
       )
+
       legacy_history = []
       for m in history:
         text = (m.get("content") or "").strip()
@@ -1200,6 +1277,7 @@ def chat_endpoint(body: ChatRequest, request: Request):
         max_retries = 3
         backoff = 2
         total_output_text = ""
+
         for attempt in range(max_retries):
           try:
             res = chat_session.send_message(prompt_content, stream=True)
@@ -1219,17 +1297,27 @@ def chat_endpoint(body: ChatRequest, request: Request):
                 client_ip,
             )
 
-            # Sauvegarder la réponse de l'IA dans Supabase
             if supabase and chat_id and total_output_text:
-              try:
-                supabase.table("messages").insert({
-                    "chat_id": chat_id,
-                    "role": "model",
-                    "content": total_output_text,
-                }).execute()
-              except Exception as ex:
-                print("Failed to save model message:", ex)
+              user_id = user.id if user and hasattr(user, "id") else None
+              model_payload = {
+                  "chat_id": chat_id,
+                  "role": "model",
+                  "content": total_output_text,
+              }
+              if user_id:
+                model_payload["user_id"] = user_id
 
+              try:
+                supabase.table("messages").insert(model_payload).execute()
+              except Exception:
+                try:
+                  supabase.table("messages").insert({
+                      "chat_id": chat_id,
+                      "role": "model",
+                      "content": total_output_text,
+                  }).execute()
+                except Exception as ex:
+                  print("Failed to save model message:", ex)
             break
           except Exception as ex:
             err_msg = str(ex)
