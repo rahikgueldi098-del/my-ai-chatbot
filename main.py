@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
@@ -127,6 +128,10 @@ def require_user(authorization: Optional[str] = Header(None)) -> AuthUser:
 class AuthRequest(BaseModel):
     email: str
     password: str
+
+
+class RenameChatRequest(BaseModel):
+    title: str
 
 
 class RefreshRequest(BaseModel):
@@ -284,8 +289,13 @@ def save_user_turn(
         title_snippet = (
             message[:30] + "..." if len(message) > 30 else message
         ) or "New Discussion"
+        # Only name the chat automatically while it still has the default
+        # title, so a title you renamed yourself is never overwritten.
+        db.table("chats").update({"title": title_snippet}).eq("id", chat_id).eq(
+            "user_id", user_id
+        ).eq("title", "New Discussion").execute()
         db.table("chats").update(
-            {"title": title_snippet, "updated_at": "now()"}
+            {"updated_at": datetime.now(timezone.utc).isoformat()}
         ).eq("id", chat_id).eq("user_id", user_id).execute()
     except Exception as ex:
         print("Failed to update chat title:", ex)
@@ -315,6 +325,8 @@ body { background-color: #212121; color: #ececec; display: flex; height: 100vh; 
 .item-action-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.85rem; padding: 2px 4px; border-radius: 4px; display: none; }
 .history-item:hover .item-action-btn { display: inline-block; }
 .item-action-btn:hover { color: #fff; }
+.history-item.active .item-action-btn { display: inline-block; }
+.rename-input { flex: 1; min-width: 0; background: #2f2f2f; color: #fff; border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 6px; font-size: 0.88rem; outline: none; }
 .export-box { border-top: 1px solid #333; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .export-title { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
 .export-buttons { display: flex; gap: 8px; }
@@ -761,6 +773,43 @@ await loadChat(chats[0].id);
 console.error("Failed to delete chat:", e);
 }
 }
+function startRename(chat, titleEl, event) {
+if (event) event.stopPropagation();
+const input = document.createElement('input');
+input.className = 'rename-input';
+input.value = chat.title || '';
+input.maxLength = 80;
+input.onclick = (e) => e.stopPropagation();
+let finished = false;
+const finish = async (save) => {
+if (finished) return;
+finished = true;
+const newTitle = input.value.trim();
+if (save && newTitle && newTitle !== chat.title) {
+const oldTitle = chat.title;
+chat.title = newTitle;
+renderSidebar();
+try {
+const res = await fetch('/api/chats/' + encodeURIComponent(chat.id), {
+method: 'PATCH',
+headers: getAuthHeaders(),
+body: JSON.stringify({ title: newTitle })
+});
+if (!res.ok) { chat.title = oldTitle; renderSidebar(); }
+} catch (e) { chat.title = oldTitle; renderSidebar(); }
+} else {
+renderSidebar();
+}
+};
+input.onkeydown = (e) => {
+if (e.key === 'Enter') finish(true);
+else if (e.key === 'Escape') finish(false);
+};
+input.onblur = () => finish(true);
+titleEl.replaceWith(input);
+input.focus();
+input.select();
+}
 function renderSidebar() {
 const list = document.getElementById('history-list');
 const searchInput = document.getElementById('chat-search');
@@ -776,11 +825,19 @@ item.onclick = () => loadChat(chat.id);
 const title = document.createElement('span');
 title.className = 'history-title';
 title.innerText = chat.title || 'New Discussion';
+title.title = 'Double-click to rename';
+title.ondblclick = (e) => startRename(chat, title, e);
+const renameBtn = document.createElement('button');
+renameBtn.className = 'item-action-btn';
+renameBtn.innerText = '✏️';
+renameBtn.title = 'Rename';
+renameBtn.onclick = (e) => startRename(chat, title, e);
 const delBtn = document.createElement('button');
 delBtn.className = 'item-action-btn';
 delBtn.innerText = '🗑️';
 delBtn.onclick = (e) => deleteChat(chat.id, e);
 item.appendChild(title);
+item.appendChild(renameBtn);
 item.appendChild(delBtn);
 list.appendChild(item);
 });
@@ -1235,6 +1292,28 @@ def create_chat(body: CreateChatRequest, user: AuthUser = Depends(require_user))
         return JSONResponse(
             res.data[0] if res.data else {"id": chat_id, "title": title}
         )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.patch("/api/chats/{chat_id}")
+def rename_chat(
+    chat_id: str, body: RenameChatRequest, user: AuthUser = Depends(require_user)
+):
+    title = (body.title or "").strip()[:80]
+    if not title:
+        return JSONResponse({"detail": "Title cannot be empty."}, status_code=400)
+    try:
+        res = (
+            user.db.table("chats")
+            .update({"title": title})
+            .eq("id", chat_id)
+            .eq("user_id", user.id)
+            .execute()
+        )
+        if not res.data:
+            return JSONResponse({"detail": "Chat not found."}, status_code=404)
+        return JSONResponse({"id": chat_id, "title": title})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
