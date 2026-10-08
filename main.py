@@ -4,7 +4,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +30,9 @@ THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "0"))
 # Only the last N messages of the history are sent to Gemini (faster + cheaper).
 MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "12"))
 MAX_RETRIES = 2
+# Limits (change them in Vercel -> Environment Variables, no code change needed)
+USER_RATE_LIMIT_PER_MIN = int(os.environ.get("USER_RATE_LIMIT_PER_MIN", "20"))
+DAILY_REQUEST_LIMIT = int(os.environ.get("DAILY_REQUEST_LIMIT", "200"))  # 0 = unlimited
 RETRY_BACKOFF_SEC = 1.0
 
 SUPABASE_URL = (
@@ -161,8 +164,9 @@ RATE_LIMIT_WINDOW_SEC = 60
 MAX_REQUESTS_PER_WINDOW = 30
 ip_request_history = collections.defaultdict(list)
 
-INPUT_TOKEN_COST_USD = 0.075 / 1_000_000
-OUTPUT_TOKEN_COST_USD = 0.30 / 1_000_000
+# Price per 1M tokens (USD). Check your model's price and set these in Vercel.
+INPUT_TOKEN_COST_USD = float(os.environ.get("GEMINI_INPUT_USD_PER_M", "0.075")) / 1_000_000
+OUTPUT_TOKEN_COST_USD = float(os.environ.get("GEMINI_OUTPUT_USD_PER_M", "0.30")) / 1_000_000
 
 analytics_store = {
     "total_requests": 0,
@@ -184,14 +188,14 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "127.0.0.1"
 
 
-def check_rate_limit(client_ip: str) -> bool:
+def check_rate_limit(client_ip: str, limit: int = MAX_REQUESTS_PER_WINDOW) -> bool:
     now = time.time()
     timestamps = ip_request_history[client_ip]
     valid_timestamps = [
         ts for ts in timestamps if now - ts < RATE_LIMIT_WINDOW_SEC
     ]
     ip_request_history[client_ip] = valid_timestamps
-    if len(valid_timestamps) >= MAX_REQUESTS_PER_WINDOW:
+    if len(valid_timestamps) >= limit:
         return False
     ip_request_history[client_ip].append(now)
     return True
@@ -203,6 +207,20 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _capture_usage(chunk: Any, usage: dict):
+    """Read the REAL token counts Gemini reports (instead of guessing)."""
+    um = getattr(chunk, "usage_metadata", None)
+    if not um:
+        return
+    p = getattr(um, "prompt_token_count", None)
+    c = getattr(um, "candidates_token_count", None)
+    t = getattr(um, "thoughts_token_count", None)
+    if p:
+        usage["p"] = p
+    if c is not None or t is not None:
+        usage["c"] = (c or 0) + (t or 0)
+
+
 def log_analytics_entry(
     endpoint: str,
     status_code: int,
@@ -210,10 +228,34 @@ def log_analytics_entry(
     prompt_tokens: int,
     completion_tokens: int,
     client_ip: str,
+    user: Any = None,
+    model: Optional[str] = None,
+    error: Optional[str] = None,
 ):
     cost = (prompt_tokens * INPUT_TOKEN_COST_USD) + (
         completion_tokens * OUTPUT_TOKEN_COST_USD
     )
+
+    # Saved in Supabase (table api_logs) so the numbers survive restarts.
+    if user is not None:
+        try:
+            user.db.table("api_logs").insert({
+                "user_id": user.id,
+                "email": user.email,
+                "endpoint": endpoint,
+                "status": status_code,
+                "latency_ms": round(latency_ms, 1),
+                "prompt_tokens": int(prompt_tokens or 0),
+                "completion_tokens": int(completion_tokens or 0),
+                "cost_usd": round(cost, 6),
+                "model": model,
+                "ip": client_ip,
+                "error": (error or None) and str(error)[:500],
+            }).execute()
+        except Exception as ex:
+            print("Failed to save api_logs row:", ex)
+
+    # In-memory copy: only used as a fallback if the database cannot be read.
     analytics_store["total_requests"] += 1
     if status_code == 200:
         analytics_store["total_successful"] += 1
@@ -243,6 +285,48 @@ def log_analytics_entry(
     analytics_store["recent_logs"].insert(0, log_entry)
     if len(analytics_store["recent_logs"]) > 50:
         analytics_store["recent_logs"].pop()
+
+
+# --- Daily quota per user (counted from the api_logs table) ---
+_quota_cache: Dict[str, List[float]] = {}  # user_id -> [requests today, fetched_at]
+_quota_lock = threading.Lock()
+
+
+def check_daily_quota(user: Any) -> bool:
+    if not DAILY_REQUEST_LIMIT:
+        return True
+    if ADMIN_EMAILS and (user.email or "").lower() in ADMIN_EMAILS:
+        return True  # admins are not limited
+    now = time.time()
+    with _quota_lock:
+        entry = _quota_cache.get(user.id)
+    if entry is None or now - entry[1] > 60:
+        try:
+            day_start = (
+                datetime.now(timezone.utc)
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .isoformat()
+            )
+            res = (
+                user.db.table("api_logs")
+                .select("id", count="exact")
+                .eq("user_id", user.id)
+                .eq("endpoint", "/api/chat")
+                .eq("status", 200)
+                .gte("created_at", day_start)
+                .limit(1)
+                .execute()
+            )
+            entry = [float(res.count or 0), now]
+        except Exception as ex:
+            print("Quota check failed (allowing request):", ex)
+            return True
+        with _quota_lock:
+            _quota_cache[user.id] = entry
+    if entry[0] >= DAILY_REQUEST_LIMIT:
+        return False
+    entry[0] += 1
+    return True
 
 
 def decode_file(file_payload: dict):
@@ -495,34 +579,42 @@ header { padding: 10px; flex-wrap: wrap; }
 <div class="modal-content">
 <div class="modal-header">
 <div class="modal-title">📊 Operations & Cost Analytics</div>
+<div style="display:flex; gap:10px; align-items:center;">
+<select id="analytics-hours" onchange="fetchAnalyticsStats()" style="background:#2f2f2f; color:#fff; border:1px solid #424242; border-radius:6px; padding:4px 8px; font-size:0.8rem;">
+<option value="1">Last hour</option>
+<option value="24" selected>Last 24 hours</option>
+<option value="168">Last 7 days</option>
+<option value="720">Last 30 days</option>
+</select>
 <button class="close-btn" onclick="closeAnalyticsModal()">✕</button>
 </div>
+</div>
 <div class="stats-grid">
-<div class="stat-card">
-<span class="stat-value" id="stat-reqs">0</span>
-<span class="stat-label">Total Requests</span>
+<div class="stat-card"><span class="stat-value" id="stat-reqs">0</span><span class="stat-label">Success / Total</span></div>
+<div class="stat-card"><span class="stat-value" id="stat-errrate" style="color: #f87171;">0%</span><span class="stat-label">Error Rate</span></div>
+<div class="stat-card"><span class="stat-value" id="stat-cost" style="color: #38bdf8;">$0.0000</span><span class="stat-label">Est. Cost (USD)</span></div>
+<div class="stat-card"><span class="stat-value" id="stat-tokens" style="color: #a78bfa;">0</span><span class="stat-label">Total Tokens</span></div>
+<div class="stat-card"><span class="stat-value" id="stat-latency" style="color: #facc15;">0ms</span><span class="stat-label">Avg Latency</span></div>
+<div class="stat-card"><span class="stat-value" id="stat-p95" style="color: #facc15;">0ms</span><span class="stat-label">P95 Latency</span></div>
+<div class="stat-card"><span class="stat-value" id="stat-users">0</span><span class="stat-label">Users (period)</span></div>
+<div class="stat-card"><span class="stat-value" id="stat-active">0</span><span class="stat-label">Active (15 min)</span></div>
 </div>
-<div class="stat-card">
-<span class="stat-value" id="stat-cost" style="color: #38bdf8;">$0.0000</span>
-<span class="stat-label">Est. Cost (USD)</span>
+<div style="font-size: 0.85rem; font-weight: 600; color: #aaa; margin-top: 4px;">Top Users by Cost</div>
+<div class="log-table-container" style="max-height: 160px;">
+<table class="log-table">
+<thead><tr><th>User</th><th>Requests</th><th>Tokens</th><th>Cost ($)</th></tr></thead>
+<tbody id="top-users-body"><tr><td colspan="4" style="text-align: center; color: #666;">No data yet.</td></tr></tbody>
+</table>
 </div>
-<div class="stat-card">
-<span class="stat-value" id="stat-tokens" style="color: #a78bfa;">0</span>
-<span class="stat-label">Total Tokens</span>
-</div>
-<div class="stat-card">
-<span class="stat-value" id="stat-latency" style="color: #facc15;">0ms</span>
-<span class="stat-label">Avg Latency</span>
-</div>
-</div>
+<div id="model-stats" style="font-size: 0.8rem; color: #888;"></div>
 <div style="font-size: 0.85rem; font-weight: 600; color: #aaa; margin-top: 4px;">Recent API Logs (Last 50)</div>
 <div class="log-table-container">
 <table class="log-table">
 <thead>
 <tr>
 <th>Time</th>
+<th>User</th>
 <th>Status</th>
-<th>IP</th>
 <th>Latency</th>
 <th>Tokens (P/C)</th>
 <th>Cost ($)</th>
@@ -533,8 +625,8 @@ header { padding: 10px; flex-wrap: wrap; }
 </tbody>
 </table>
 </div>
-<div style="display: flex; justify-content: space-between; align-items: center;">
-<span style="font-size: 0.75rem; color: #666;">Rate Limit: 30 requests / min / IP</span>
+<div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
+<span id="limits-note" style="font-size: 0.75rem; color: #666;"></span>
 <button class="export-btn" style="max-width: 120px;" onclick="fetchAnalyticsStats()">🔄 Refresh</button>
 </div>
 </div>
@@ -1169,37 +1261,60 @@ const b = document.getElementById('analytics-btn');
 if (b) b.style.display = d.is_admin ? '' : 'none';
 } catch (e) {}
 }
+function fmtInt(n) { return Number(n || 0).toLocaleString(); }
 async function fetchAnalyticsStats() {
+const body = document.getElementById('log-table-body');
+const hoursEl = document.getElementById('analytics-hours');
+const hours = hoursEl ? hoursEl.value : 24;
 try {
-const res = await fetch('/api/admin/stats', { headers: getAuthHeaders() });
+const res = await fetch('/api/admin/stats?hours=' + encodeURIComponent(hours), { headers: getAuthHeaders() });
 if (res.status === 403) {
-document.getElementById('log-table-body').innerHTML = '<tr><td colspan="6" style="text-align: center; color: #f87171;">Analytics is restricted to administrators.</td></tr>';
+body.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #f87171;">Analytics is restricted to administrators.</td></tr>';
 return;
 }
-if (!res.ok) return;
-const data = await res.json();
-document.getElementById('stat-reqs').innerText = `${data.total_successful}/${data.total_requests}`;
-document.getElementById('stat-cost').innerText = `$${data.total_cost_usd.toFixed(5)}`;
-document.getElementById('stat-tokens').innerText = (data.total_prompt_tokens + data.total_completion_tokens).toLocaleString();
-document.getElementById('stat-latency').innerText = `${data.avg_latency_ms.toFixed(0)}ms`;
-const tableBody = document.getElementById('log-table-body');
+const data = await res.json().catch(() => ({}));
+if (!res.ok) {
+body.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #f87171;">' + escapeHtml(data.detail || ('Error ' + res.status)) + '</td></tr>';
+return;
+}
+const set = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
+set('stat-reqs', `${data.total_successful}/${data.total_requests}`);
+set('stat-errrate', `${data.error_rate}%`);
+set('stat-cost', `$${data.total_cost_usd.toFixed(5)}`);
+set('stat-tokens', fmtInt(data.total_prompt_tokens + data.total_completion_tokens));
+set('stat-latency', `${Math.round(data.avg_latency_ms)}ms`);
+set('stat-p95', `${Math.round(data.p95_latency_ms)}ms`);
+set('stat-users', data.active_users);
+set('stat-active', data.active_now);
+const lim = data.limits || {};
+set('limits-note', `Limits: ${lim.user_per_min}/min per user, ${lim.ip_per_min}/min per IP, ${lim.daily || 'no'} messages/day per user` + (data.truncated ? ' · showing the latest 1000 requests' : ''));
+const ms = (data.by_model || []).map(m => `${escapeHtml(m.model)}: ${Math.round(m.avg_latency_ms)}ms avg (${m.requests} requests)`).join(' · ');
+const msEl = document.getElementById('model-stats');
+if (msEl) msEl.innerHTML = ms ? 'Model latency: ' + ms : '';
+const topBody = document.getElementById('top-users-body');
+if (topBody) {
+if (!data.top_users || data.top_users.length === 0) {
+topBody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #666;">No data yet.</td></tr>';
+} else {
+topBody.innerHTML = data.top_users.map(u => `<tr><td>${escapeHtml(u.email)}</td><td>${u.requests}</td><td>${fmtInt(u.tokens)}</td><td>$${u.cost.toFixed(5)}</td></tr>`).join('');
+}
+}
 if (!data.recent_logs || data.recent_logs.length === 0) {
-tableBody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #666;">No logs recorded yet.</td></tr>';
+body.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #666;">No logs recorded yet.</td></tr>';
 return;
 }
-let html = '';
-data.recent_logs.forEach(log => {
+body.innerHTML = data.recent_logs.map(log => {
 const statusClass = log.status === 200 ? 'status-200' : 'status-429';
-html += `<tr>
-<td>${log.time}</td>
-<td class="${statusClass}">${log.status}</td>
-<td>${log.ip}</td>
-<td>${log.latency_ms}ms</td>
+const tip = log.error ? ` title="${escapeHtml(log.error)}"` : '';
+return `<tr>
+<td>${escapeHtml(log.time)}</td>
+<td>${escapeHtml(log.email)}</td>
+<td class="${statusClass}"${tip}>${log.status}</td>
+<td>${Math.round(log.latency_ms)}ms</td>
 <td>${log.prompt_tokens}/${log.completion_tokens}</td>
 <td>$${log.cost_usd.toFixed(6)}</td>
 </tr>`;
-});
-tableBody.innerHTML = html;
+}).join('');
 } catch (e) {}
 }
 window.addEventListener('DOMContentLoaded', () => { updateUserBox(); initStorage(); });
@@ -1384,23 +1499,129 @@ def get_me(user: AuthUser = Depends(require_user)):
     return JSONResponse({"email": user.email, "is_admin": is_admin(user)})
 
 
+def _parse_ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 @app.get("/api/admin/stats")
-def get_admin_stats(request: Request, user: AuthUser = Depends(require_user)):
+def get_admin_stats(
+    request: Request, hours: int = 24, user: AuthUser = Depends(require_user)
+):
     # If ADMIN_EMAILS is set (comma-separated), only those users may see stats.
     if not is_admin(user):
         raise HTTPException(status_code=403, detail="Admins only.")
-    latencies = analytics_store["latency_ms_history"]
-    avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
+
+    hours = max(1, min(int(hours), 24 * 30))
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(hours=hours)).isoformat()
+    try:
+        res = (
+            user.db.table("api_logs")
+            .select(
+                "created_at,user_id,email,endpoint,status,latency_ms,"
+                "prompt_tokens,completion_tokens,cost_usd,model,ip,error"
+            )
+            .gte("created_at", since)
+            .order("created_at", desc=True)
+            .limit(1000)
+            .execute()
+        )
+        rows = res.data or []
+    except Exception as e:
+        return JSONResponse(
+            {"detail": f"Could not read the api_logs table: {e}"}, status_code=500
+        )
+
+    total = len(rows)
+    ok = sum(1 for r in rows if r["status"] == 200)
+    limited = sum(1 for r in rows if r["status"] == 429)
+    failed = total - ok
+    prompt_tokens = sum(int(r.get("prompt_tokens") or 0) for r in rows)
+    completion_tokens = sum(int(r.get("completion_tokens") or 0) for r in rows)
+    cost = sum(float(r.get("cost_usd") or 0) for r in rows)
+
+    lats = sorted(
+        float(r["latency_ms"])
+        for r in rows
+        if r["status"] == 200 and r.get("latency_ms")
+    )
+    avg_latency = sum(lats) / len(lats) if lats else 0.0
+    p95_latency = lats[min(len(lats) - 1, int(len(lats) * 0.95))] if lats else 0.0
+
+    recent_cut = now - timedelta(minutes=15)
+    users_all = set()
+    users_now = set()
+    by_user: Dict[str, Dict[str, Any]] = {}
+    by_model: Dict[str, List[float]] = {}
+    for r in rows:
+        uid = r.get("user_id") or "anonymous"
+        users_all.add(uid)
+        try:
+            if _parse_ts(r["created_at"]) >= recent_cut:
+                users_now.add(uid)
+        except Exception:
+            pass
+        u = by_user.setdefault(
+            uid,
+            {"email": r.get("email") or "unknown", "requests": 0, "tokens": 0, "cost": 0.0},
+        )
+        u["requests"] += 1
+        u["tokens"] += int(r.get("prompt_tokens") or 0) + int(r.get("completion_tokens") or 0)
+        u["cost"] += float(r.get("cost_usd") or 0)
+        if r["status"] == 200 and r.get("model") and r.get("latency_ms"):
+            m = by_model.setdefault(r["model"], [0.0, 0.0])
+            m[0] += 1
+            m[1] += float(r["latency_ms"])
+
+    top_users = sorted(by_user.values(), key=lambda x: x["cost"], reverse=True)[:10]
+    for u in top_users:
+        u["cost"] = round(u["cost"], 6)
+
+    recent_logs = []
+    for r in rows[:50]:
+        try:
+            when = _parse_ts(r["created_at"]).strftime("%d/%m %H:%M:%S")
+        except Exception:
+            when = ""
+        recent_logs.append({
+            "time": when,
+            "email": r.get("email") or "",
+            "endpoint": r.get("endpoint"),
+            "ip": r.get("ip"),
+            "status": r["status"],
+            "latency_ms": r.get("latency_ms") or 0,
+            "prompt_tokens": r.get("prompt_tokens") or 0,
+            "completion_tokens": r.get("completion_tokens") or 0,
+            "cost_usd": float(r.get("cost_usd") or 0),
+            "error": r.get("error"),
+        })
+
     return JSONResponse({
-        "total_requests": analytics_store["total_requests"],
-        "total_successful": analytics_store["total_successful"],
-        "total_failed": analytics_store["total_failed"],
-        "total_rate_limited": analytics_store["total_rate_limited"],
-        "total_prompt_tokens": analytics_store["total_prompt_tokens"],
-        "total_completion_tokens": analytics_store["total_completion_tokens"],
-        "total_cost_usd": round(analytics_store["total_cost_usd"], 6),
+        "hours": hours,
+        "truncated": total >= 1000,
+        "total_requests": total,
+        "total_successful": ok,
+        "total_failed": failed,
+        "total_rate_limited": limited,
+        "error_rate": round((failed - limited) / total * 100, 1) if total else 0.0,
+        "total_prompt_tokens": prompt_tokens,
+        "total_completion_tokens": completion_tokens,
+        "total_cost_usd": round(cost, 6),
         "avg_latency_ms": round(avg_latency, 1),
-        "recent_logs": analytics_store["recent_logs"],
+        "p95_latency_ms": round(p95_latency, 1),
+        "active_users": len(users_all),
+        "active_now": len(users_now),
+        "top_users": top_users,
+        "by_model": [
+            {"model": k, "requests": int(v[0]), "avg_latency_ms": round(v[1] / v[0], 1)}
+            for k, v in by_model.items()
+        ],
+        "limits": {
+            "user_per_min": USER_RATE_LIMIT_PER_MIN,
+            "ip_per_min": MAX_REQUESTS_PER_WINDOW,
+            "daily": DAILY_REQUEST_LIMIT,
+        },
+        "recent_logs": recent_logs,
     })
 
 
@@ -1414,7 +1635,9 @@ def enhance_prompt(
     client_ip = get_client_ip(request)
 
     if not check_rate_limit(client_ip):
-        log_analytics_entry("/api/enhance-prompt", 429, 0.0, 0, 0, client_ip)
+        log_analytics_entry(
+            "/api/enhance-prompt", 429, 0.0, 0, 0, client_ip, user=user, model=MODEL_NAME
+        )
         raise HTTPException(
             status_code=429, detail="Too Many Requests. Rate limit exceeded."
         )
@@ -1453,13 +1676,15 @@ def enhance_prompt(
         c_tokens = estimate_tokens(enhanced)
         latency_ms = (time.time() - start_time) * 1000
         log_analytics_entry(
-            "/api/enhance-prompt", 200, latency_ms, p_tokens, c_tokens, client_ip
+            "/api/enhance-prompt", 200, latency_ms, p_tokens, c_tokens, client_ip,
+            user=user, model=MODEL_NAME,
         )
         return JSONResponse({"enhanced_prompt": enhanced})
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         log_analytics_entry(
-            "/api/enhance-prompt", 500, latency_ms, 0, 0, client_ip
+            "/api/enhance-prompt", 500, latency_ms, 0, 0, client_ip,
+            user=user, model=MODEL_NAME, error=str(e),
         )
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1489,13 +1714,36 @@ def chat_endpoint(
     client_ip = get_client_ip(request)
 
     if not check_rate_limit(client_ip):
-        log_analytics_entry("/api/chat", 429, 0.0, 0, 0, client_ip)
+        log_analytics_entry(
+            "/api/chat", 429, 0.0, 0, 0, client_ip, user=user, model=MODEL_NAME,
+            error="IP rate limit",
+        )
         raise HTTPException(
             status_code=429,
             detail=(
                 "Too Many Requests. Rate limit exceeded (30 reqs/min). Please wait"
                 " a moment."
             ),
+        )
+
+    if not check_rate_limit(f"user:{user.id}", USER_RATE_LIMIT_PER_MIN):
+        log_analytics_entry(
+            "/api/chat", 429, 0.0, 0, 0, client_ip, user=user, model=MODEL_NAME,
+            error="User rate limit",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many messages ({USER_RATE_LIMIT_PER_MIN} per minute). Please wait a moment.",
+        )
+
+    if not check_daily_quota(user):
+        log_analytics_entry(
+            "/api/chat", 429, 0.0, 0, 0, client_ip, user=user, model=MODEL_NAME,
+            error="Daily quota",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"Daily limit reached ({DAILY_REQUEST_LIMIT} messages per day). Try again tomorrow.",
         )
 
     try:
@@ -1537,6 +1785,7 @@ def chat_endpoint(
 
         # `state` lets the retry loop switch thinking off if the model rejects it.
         state = {"use_thinking": True}
+        usage: Dict[str, int] = {}
 
         if SDK_MODE == "NEW":
             client = get_gemini_client(api_key)
@@ -1579,6 +1828,7 @@ def chat_endpoint(
             )
 
             def make_stream():
+                usage.clear()
                 config = build_config(
                     system_instruction, tools, state["use_thinking"]
                 )
@@ -1586,6 +1836,7 @@ def chat_endpoint(
                     model=MODEL_NAME, contents=contents, config=config
                 )
                 for chunk in response:
+                    _capture_usage(chunk, usage)
                     if chunk.text:
                         yield chunk.text
 
@@ -1620,8 +1871,10 @@ def chat_endpoint(
             chat_session = model.start_chat(history=legacy_history)
 
             def make_stream():
+                usage.clear()
                 res = chat_session.send_message(prompt_content, stream=True)
                 for chunk in res:
+                    _capture_usage(chunk, usage)
                     if chunk.text:
                         yield chunk.text
 
@@ -1639,9 +1892,11 @@ def chat_endpoint(
                         "/api/chat",
                         200,
                         latency_ms,
-                        prompt_tokens_est,
-                        estimate_tokens(total_output_text),
+                        usage.get("p") or prompt_tokens_est,
+                        usage.get("c") or estimate_tokens(total_output_text),
                         client_ip,
+                        user=user,
+                        model=MODEL_NAME,
                     )
                     if chat_id and total_output_text:
                         # Keep order: user message first, then the answer.
@@ -1678,7 +1933,8 @@ def chat_endpoint(
                     latency_ms = (time.time() - start_time) * 1000
                     status_code = 429 if "429" in err_msg else 500
                     log_analytics_entry(
-                        "/api/chat", status_code, latency_ms, 0, 0, client_ip
+                        "/api/chat", status_code, latency_ms, 0, 0, client_ip,
+                        user=user, model=MODEL_NAME, error=err_msg,
                     )
                     yield f"\n\n⚠️ Error: {err_msg}"
                     return
