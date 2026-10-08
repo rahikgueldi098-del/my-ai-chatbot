@@ -445,7 +445,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <span>AI Assistant Studio Pro</span>
 </div>
 <div class="header-controls">
-<button class="admin-btn" onclick="openAnalyticsModal()">📊 Analytics</button>
+<button id="analytics-btn" class="admin-btn" style="display:none;" onclick="openAnalyticsModal()">📊 Analytics</button>
 <button id="search-toggle" class="toggle-btn" onclick="toggleSearch()">Web Search: OFF</button>
 <select id="persona-select" onchange="handlePersonaChange(this)">
 <option value="You are a helpful, smart, and precise AI assistant.">Default Assistant</option>
@@ -690,6 +690,7 @@ return headers;
 }
 async function initStorage() {
 if (!localStorage.getItem('supabase_token')) { showAuth(); return; }
+checkAdmin();
 try {
 const res = await fetch('/api/chats', { headers: getAuthHeaders() });
 if (res.status === 401) return;
@@ -1159,9 +1160,22 @@ fetchAnalyticsStats();
 function closeAnalyticsModal() {
 document.getElementById('analytics-modal').classList.remove('open');
 }
+async function checkAdmin() {
+try {
+const res = await fetch('/api/me', { headers: getAuthHeaders() });
+if (!res.ok) return;
+const d = await res.json();
+const b = document.getElementById('analytics-btn');
+if (b) b.style.display = d.is_admin ? '' : 'none';
+} catch (e) {}
+}
 async function fetchAnalyticsStats() {
 try {
 const res = await fetch('/api/admin/stats', { headers: getAuthHeaders() });
+if (res.status === 403) {
+document.getElementById('log-table-body').innerHTML = '<tr><td colspan="6" style="text-align: center; color: #f87171;">Analytics is restricted to administrators.</td></tr>';
+return;
+}
 if (!res.ok) return;
 const data = await res.json();
 document.getElementById('stat-reqs').innerText = `${data.total_successful}/${data.total_requests}`;
@@ -1360,10 +1374,20 @@ def delete_chat(chat_id: str, user: AuthUser = Depends(require_user)):
     return JSONResponse({"status": "deleted"})
 
 
+def is_admin(user: AuthUser) -> bool:
+    # If ADMIN_EMAILS is not set, every logged-in user counts as admin.
+    return not ADMIN_EMAILS or (user.email or "").lower() in ADMIN_EMAILS
+
+
+@app.get("/api/me")
+def get_me(user: AuthUser = Depends(require_user)):
+    return JSONResponse({"email": user.email, "is_admin": is_admin(user)})
+
+
 @app.get("/api/admin/stats")
 def get_admin_stats(request: Request, user: AuthUser = Depends(require_user)):
     # If ADMIN_EMAILS is set (comma-separated), only those users may see stats.
-    if ADMIN_EMAILS and (user.email or "").lower() not in ADMIN_EMAILS:
+    if not is_admin(user):
         raise HTTPException(status_code=403, detail="Admins only.")
     latencies = analytics_store["latency_ms_history"]
     avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
