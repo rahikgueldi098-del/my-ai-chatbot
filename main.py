@@ -65,7 +65,7 @@ class CreateChatRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-  chat_id: str
+  chat_id: Optional[str] = "default_chat"
   message: str = ""
   history: List[Dict[str, Any]] = []
   file: Optional[Dict[str, Any]] = None
