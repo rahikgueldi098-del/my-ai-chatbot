@@ -20,7 +20,7 @@ except ImportError:
 
     SDK_MODE = "LEGACY"
 
-MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 SUPABASE_URL = (
     os.environ.get("SUPABASE_URL", "").replace("/rest/v1/", "").strip("/")
 )
