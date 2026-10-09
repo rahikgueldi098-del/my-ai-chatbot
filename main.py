@@ -1132,7 +1132,7 @@ function mermaidRunner(CODE) {
     out.appendChild(d);
     try { parent.postMessage({ canvasError: msg }, '*'); } catch (e) {}
   }
-  var versions = ['11.4.1', '10.9.1'];
+  var versions = ['11.16.1', '11.4.1', '10.9.1'];
   var hosts = [
     function (v) { return 'https://cdn.jsdelivr.net/npm/mermaid@' + v + '/dist/mermaid.min.js'; },
     function (v) { return 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/' + v + '/mermaid.min.js'; },
@@ -1171,8 +1171,9 @@ function mermaidRunner(CODE) {
     if (!svg) return false;
     var html = svg.outerHTML;
     if (/viewBox="[^"]*NaN/.test(html) || /transform="[^"]*NaN/.test(html)) return false;
-    var r = svg.getBoundingClientRect();
-    if (!(r.width > 20 && r.height > 20)) return false;
+    // Check the viewBox instead of on-screen size (layout can be 0 while the panel opens)
+    var vb = (svg.getAttribute('viewBox') || '').split(/[\s,]+/).map(Number);
+    if (vb.length === 4 && !(vb[2] > 20 && vb[3] > 20)) return false;
     if (/^\s*(flowchart|graph)\b/m.test(CODE) && svg.querySelectorAll('.node').length === 0) return false;
     return true;
   }
@@ -1261,7 +1262,7 @@ function buildSrcdoc(art) {
   }
   if (art.type === 'mermaid') {
     const codeJson = JSON.stringify(art.code).replace(/</g, '\\u003c');
-    return '<!doctype html><html><head>' + head + '<style>html,body{margin:0;background:#fff;font-family:system-ui,sans-serif}body{padding:16px;overflow:auto}#out{min-width:min-content}#out svg{max-width:100%;height:auto}</style>' + errHook + '</head><body><div id="out" style="color:#666;font-size:14px">Rendering diagram...</div><script>(' + mermaidRunner.toString() + ')(' + codeJson + ');<\/script></body></html>';
+    return '<!doctype html><html><head>' + head + '<style>html,body{margin:0;background:#fff;font-family:system-ui,sans-serif}body{padding:16px;overflow:auto}#out svg{display:block;margin:0 auto;max-width:100%;height:auto}</style>' + errHook + '</head><body><div id="out" style="color:#666;font-size:14px">Rendering diagram...</div><script>(' + mermaidRunner.toString() + ')(' + codeJson + ');<\/script></body></html>';
   }
   const body = safeParseMarkdown(art.code);
   return '<!doctype html><html><head>' + head + '<style>body{max-width:760px;margin:0 auto;padding:24px 20px;font-family:system-ui,sans-serif;line-height:1.65;color:#1f2328;background:#fff}pre{background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto}code{background:#f6f8fa;padding:2px 5px;border-radius:4px}table{border-collapse:collapse}td,th{border:1px solid #d0d7de;padding:6px 10px}blockquote{border-left:4px solid #d0d7de;margin:0;padding-left:14px;color:#57606a}img{max-width:100%}</style></head><body>' + body + '</body></html>';
