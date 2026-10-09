@@ -1292,6 +1292,54 @@ function selectCanvasArtifact(i) {
   canvasIndex = parseInt(i, 10) || 0;
   renderCanvas();
 }
+// Renders Mermaid in the MAIN page (which has real layout/fonts) and returns an SVG string.
+// Rendering inside the sandboxed iframe was producing empty drawings.
+let _mermaidLoading = null;
+function loadMermaidParent() {
+  if (window.mermaid) return Promise.resolve(window.mermaid);
+  if (_mermaidLoading) return _mermaidLoading;
+  const urls = [
+    'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.4.1/mermaid.min.js',
+    'https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js',
+    'https://unpkg.com/mermaid@11.4.1/dist/mermaid.min.js'
+  ];
+  _mermaidLoading = new Promise(function (resolve, reject) {
+    let i = 0;
+    function next() {
+      if (i >= urls.length) { _mermaidLoading = null; reject(new Error('Mermaid failed to load')); return; }
+      const s = document.createElement('script');
+      s.src = urls[i++];
+      s.onload = function () { if (window.mermaid) resolve(window.mermaid); else next(); };
+      s.onerror = function () { s.remove(); next(); };
+      document.head.appendChild(s);
+    }
+    next();
+  });
+  return _mermaidLoading;
+}
+async function renderMermaidInParent(code) {
+  const mermaid = await loadMermaidParent();
+  const stripBr = function (c) { return c.replace(/<br\s*\/?>/gi, ' '); };
+  const stripCls = function (c) { return c.replace(/:::[\w-]+/g, ''); };
+  const variants = [code, stripCls(stripBr(code))];
+  let lastErr = null;
+  for (let i = 0; i < variants.length; i++) {
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:0;top:0;width:1200px;opacity:0;pointer-events:none;z-index:-1;';
+    document.body.appendChild(host);
+    try {
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'default', suppressErrorRendering: true, flowchart: { htmlLabels: true, curve: 'basis' } });
+      const r = await mermaid.render('mmd' + Date.now() + '_' + i, variants[i].trim(), host);
+      const m = /viewBox="([^"]+)"/.exec(r.svg);
+      const vb = m ? m[1].split(/\s+/).map(Number) : [];
+      if (r.svg.indexOf('NaN') === -1 && (vb.length !== 4 || (vb[2] > 20 && vb[3] > 20))) return r.svg;
+      lastErr = new Error('Empty drawing');
+    } catch (e) { lastErr = e; }
+    finally { host.remove(); document.querySelectorAll('[id^="dmmd"]').forEach(function (n) { n.remove(); }); }
+  }
+  throw lastErr || new Error('Diagram failed');
+}
 function renderCanvas() {
   const art = canvasArtifacts[canvasIndex];
   if (!art) return;
@@ -1299,7 +1347,19 @@ function renderCanvas() {
   const err = document.getElementById('canvas-error');
   err.style.display = 'none';
   err.textContent = '';
-  document.getElementById('canvas-frame').srcdoc = buildSrcdoc(art);
+  const frameEl = document.getElementById('canvas-frame');
+  if (art.type === 'mermaid') {
+    frameEl.srcdoc = '<!doctype html><body style="font-family:system-ui,sans-serif;color:#666;padding:16px">Rendering diagram...</body>';
+    renderMermaidInParent(art.code).then(function (svg) {
+      if (canvasArtifacts[canvasIndex] !== art) return;
+      frameEl.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0;background:#fff}body{padding:16px;overflow:auto}svg{display:block;margin:0 auto;max-width:100%;height:auto}</style></head><body>' + svg + '</body></html>';
+    }).catch(function () {
+      // Fallback: the old in-iframe renderer
+      if (canvasArtifacts[canvasIndex] === art) frameEl.srcdoc = buildSrcdoc(art);
+    });
+  } else {
+    frameEl.srcdoc = buildSrcdoc(art);
+  }
   const codeEl = document.getElementById('canvas-code');
   const lang = art.type === 'markdown' ? 'markdown' : (art.type === 'mermaid' ? 'plaintext' : 'xml');
   try { codeEl.innerHTML = window.hljs ? window.hljs.highlight(art.code, { language: lang }).value : canvasEsc(art.code); }
