@@ -1090,7 +1090,8 @@ function mergeAssets(code, cssBlocks, jsBlocks) {
 }
 function canvasEsc(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function buildSrcdoc(art) {
-  const errHook = '<script>window.addEventListener("error",function(e){parent.postMessage({canvasError:String(e.message||"Script error")},"*")});<\/script>';
+  const storageShim = '(function(){function mk(){var d={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v)},removeItem:function(k){delete d[k]},clear:function(){d={}},key:function(i){return Object.keys(d)[i]||null},get length(){return Object.keys(d).length}}}try{Object.defineProperty(window,"localStorage",{value:mk(),configurable:true});Object.defineProperty(window,"sessionStorage",{value:mk(),configurable:true})}catch(e){}})();';
+  const errHook = '<script>' + storageShim + 'window.addEventListener("error",function(e){parent.postMessage({canvasError:String(e.message||"Script error")},"*")});<\/script>';
   const head = '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
   if (art.type === 'html') {
     let doc = art.code;
