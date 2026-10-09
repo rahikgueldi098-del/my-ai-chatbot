@@ -1352,10 +1352,14 @@ function renderCanvas() {
     frameEl.srcdoc = '<!doctype html><body style="font-family:system-ui,sans-serif;color:#666;padding:16px">Rendering diagram...</body>';
     renderMermaidInParent(art.code).then(function (svg) {
       if (canvasArtifacts[canvasIndex] !== art) return;
-      frameEl.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0;background:#fff}body{padding:16px;overflow:auto}svg{display:block;margin:0 auto;max-width:100%;height:auto}</style></head><body>' + svg + '</body></html>';
-    }).catch(function () {
-      // Fallback: the old in-iframe renderer
-      if (canvasArtifacts[canvasIndex] === art) frameEl.srcdoc = buildSrcdoc(art);
+      frameEl.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0;background:#fff}body{padding:16px;overflow:auto}svg{display:block;margin:0 auto;max-width:100%;height:auto}</style></head><body><div style="font:11px system-ui;color:#999;margin-bottom:6px">[preview v3] svg ' + svg.length + ' chars</div>' + svg + '</body></html>';
+      console.log('[preview v3] mermaid svg length', svg.length, svg.slice(0, 300));
+    }).catch(function (e) {
+      console.error('[preview v3] mermaid failed:', e);
+      const eb = document.getElementById('canvas-error');
+      eb.style.display = 'block';
+      eb.textContent = '[preview v3] Mermaid failed in main page: ' + (e && e.message ? e.message : e);
+      frameEl.srcdoc = '<!doctype html><body style="font-family:system-ui,sans-serif;color:#b91c1c;padding:16px">Diagram could not be drawn: ' + canvasEsc(String(e && e.message ? e.message : e)) + '</body>';
     });
   } else {
     frameEl.srcdoc = buildSrcdoc(art);
