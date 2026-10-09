@@ -1165,17 +1165,17 @@ function mermaidRunner(CODE) {
       return line.replace(/\s+--\s+[^>]+?\s+-->/g, ' -->').replace(/-->\s*\|[^|]*\|/g, '-->');
     }).join('\n');
   }
-  // True only if the drawing really exists (Mermaid can "succeed" with an empty/NaN drawing).
-  function drawingLooksOk() {
+  // Returns '' if the drawing is fine, otherwise a short reason why it was rejected.
+  var lastSvg = '';
+  function drawingProblem() {
     var svg = out.querySelector('svg');
-    if (!svg) return false;
+    if (!svg) return 'no <svg> element found';
     var html = svg.outerHTML;
-    if (/viewBox="[^"]*NaN/.test(html) || /transform="[^"]*NaN/.test(html)) return false;
-    // Check the viewBox instead of on-screen size (layout can be 0 while the panel opens)
+    if (/viewBox="[^"]*NaN/.test(html) || /transform="[^"]*NaN/.test(html)) return 'NaN sizes in the SVG';
     var vb = (svg.getAttribute('viewBox') || '').split(/[\s,]+/).map(Number);
-    if (vb.length === 4 && !(vb[2] > 20 && vb[3] > 20)) return false;
-    if (/^\s*(flowchart|graph)\b/m.test(CODE) && svg.querySelectorAll('.node').length === 0) return false;
-    return true;
+    if (vb.length === 4 && !(vb[2] > 20 && vb[3] > 20)) return 'viewBox too small (' + vb.join(' ') + ')';
+    if (/^\s*(flowchart|graph)\b/m.test(CODE) && svg.querySelectorAll('.node, .nodes > g, g[id^="flowchart-"]').length === 0) return 'no nodes found in the SVG';
+    return '';
   }
   var fixes = [
     function (c) { return c.replace(/<br\s*\/?>/gi, '<br/>'); },
@@ -1186,7 +1186,8 @@ function mermaidRunner(CODE) {
     function (c) { return dropLabels(stripClasses(stripBr(c))); }
   ];
   var curves = ['basis', 'basis', 'linear', 'linear', 'linear', 'linear'];
-  var attempts = fixes.map(function (f, i) { return { curve: curves[i], fix: f }; });
+  var htmlLabelsOpt = [true, true, false, false, false, false];
+  var attempts = fixes.map(function (f, i) { return { curve: curves[i], hl: htmlLabelsOpt[i], fix: f }; });
   function run(vi, ai) {
     if (ai >= attempts.length) { loadVersion(vi + 1); return; }
     var a = attempts[ai];
@@ -1196,13 +1197,15 @@ function mermaidRunner(CODE) {
         suppressErrorRendering: true,
         securityLevel: 'loose',
         theme: 'default',
-        flowchart: { curve: a.curve, htmlLabels: true }
+        flowchart: { curve: a.curve, htmlLabels: a.hl, useMaxWidth: false }
       });
       window.mermaid.render('dg' + Date.now() + '_' + vi + '_' + ai, a.fix(CODE).trim()).then(function (r) {
         cleanup();
         out.innerHTML = r.svg;
-        if (!drawingLooksOk()) {
-          lastErr = new Error('Mermaid produced an empty drawing (attempt ' + (ai + 1) + ').');
+        var prob = drawingProblem();
+        if (prob) {
+          lastErr = new Error('Mermaid produced an empty drawing (attempt ' + (ai + 1) + ', mermaid ' + versions[vi] + '): ' + prob + '. [preview-fix v2]');
+          if (prob.indexOf('no nodes') === 0 || prob.indexOf('viewBox') === 0) lastSvg = r.svg;
           out.innerHTML = '';
           run(vi, ai + 1);
           return;
@@ -1229,6 +1232,7 @@ function mermaidRunner(CODE) {
   }
   function loadVersion(vi) {
     if (vi >= versions.length) {
+      if (lastSvg) { cleanup(); out.innerHTML = lastSvg; finished = true; return; }
       if (lastErr) {
         fail('Diagram error:\n' + (lastErr.message ? lastErr.message : lastErr) + '\n\nThe diagram code itself needs simplifying: ask the AI to redraw it with simpler labels and fewer loops.');
       } else {
@@ -1242,7 +1246,14 @@ function mermaidRunner(CODE) {
     });
   }
   setTimeout(function () { if (!finished) fail('The diagram took too long to render. Try again or check your connection.'); }, 30000);
-  loadVersion(0);
+  var startTries = 0;
+  function start() {
+    if ((window.innerWidth < 50 || window.innerHeight < 50) && startTries++ < 50) { setTimeout(start, 100); return; }
+    var go = function () { loadVersion(0); };
+    try { if (document.fonts && document.fonts.ready) { document.fonts.ready.then(go, go); return; } } catch (e) {}
+    go();
+  }
+  start();
 }
 function buildSrcdoc(art) {
   const storageShim = '(function(){function mk(){var d={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v)},removeItem:function(k){delete d[k]},clear:function(){d={}},key:function(i){return Object.keys(d)[i]||null},get length(){return Object.keys(d).length}}}try{Object.defineProperty(window,"localStorage",{value:mk(),configurable:true});Object.defineProperty(window,"sessionStorage",{value:mk(),configurable:true})}catch(e){}})();';
