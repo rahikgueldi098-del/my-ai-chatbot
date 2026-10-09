@@ -533,6 +533,7 @@ header { padding: 10px; flex-wrap: wrap; }
 #canvas-error { display: none; background: #450a0a; color: #fca5a5; font-size: 0.8rem; padding: 6px 12px; border-bottom: 1px solid #7f1d1d; }
 #canvas-body { flex: 1; min-height: 0; position: relative; background: #fff; }
 #canvas-frame { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+#canvas-diagram { display: none; position: absolute; inset: 0; overflow: auto; background: #fff; padding: 16px; box-sizing: border-box; }
 #canvas-code { display: none; position: absolute; inset: 0; overflow: auto; margin: 0; padding: 14px; background: #0d1117; color: #e6edf3; font-size: 0.82rem; line-height: 1.5; font-family: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace; white-space: pre; tab-size: 2; }
 @media (max-width: 768px) {
 #canvas-panel.open { position: fixed; inset: 0; width: 100%; max-width: none; z-index: 60; }
@@ -616,6 +617,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <div id="canvas-error"></div>
 <div id="canvas-body">
 <iframe id="canvas-frame" sandbox="allow-scripts allow-forms allow-modals allow-popups" referrerpolicy="no-referrer" title="Live preview"></iframe>
+<div id="canvas-diagram"></div>
 <pre id="canvas-code"></pre>
 </div>
 </div>
@@ -1323,7 +1325,7 @@ function loadMermaidParent() {
 function mermaidSanitize(code) {
   var c = String(code || '').replace(/\r/g, '').trim();
   c = c.replace(/^```(?:mermaid)?\s*/i, '').replace(/```\s*$/, '').trim();   // stray fences
-  c = c.replace(/<br\s*\/?>/gi, '\\n');                                        // <br/> -> line break
+  c = c.replace(/<br\s*\/?>/gi, '<br/>');                                      // normalise line breaks
   c = c.replace(/:::[\w-]+/g, '');                                             // ::: classes
   c = c.replace(/^\s*classDef\s.*$/gim, '');                                   // classDef lines (no longer used)
   c = c.replace(/^\s*class\s+[\w,\s]+\s+\w+\s*;?\s*$/gim, '');                 // "class A,B name" lines
@@ -1367,6 +1369,8 @@ async function renderMermaidInParent(code) {
   }
   throw lastErr || new Error('Diagram failed');
 }
+let _mmdToken = 0;
+let _mmdQueue = Promise.resolve();
 function renderCanvas() {
   const art = canvasArtifacts[canvasIndex];
   if (!art) return;
@@ -1375,20 +1379,28 @@ function renderCanvas() {
   err.style.display = 'none';
   err.textContent = '';
   const frameEl = document.getElementById('canvas-frame');
+  const diag = document.getElementById('canvas-diagram');
+  const token = ++_mmdToken;
   if (art.type === 'mermaid') {
-    frameEl.srcdoc = '<!doctype html><body style="font-family:system-ui,sans-serif;color:#666;padding:16px">Rendering diagram...</body>';
-    renderMermaidInParent(art.code).then(function (svg) {
-      if (canvasArtifacts[canvasIndex] !== art) return;
-      frameEl.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#fff}body{padding:16px;overflow:auto}</style></head><body>' + svg + '</body></html>';
-      console.log('[preview v3] mermaid svg length', svg.length, svg.slice(0, 300));
-    }).catch(function (e) {
-      console.error('[preview v3] mermaid failed:', e);
-      const eb = document.getElementById('canvas-error');
-      eb.style.display = 'block';
-      eb.textContent = '[preview v3] Mermaid failed in main page: ' + (e && e.message ? e.message : e);
-      frameEl.srcdoc = '<!doctype html><body style="font-family:system-ui,sans-serif;color:#b91c1c;padding:16px">Diagram could not be drawn: ' + canvasEsc(String(e && e.message ? e.message : e)) + '</body>';
+    frameEl.srcdoc = '';
+    diag.innerHTML = '<div style="color:#666;font:14px system-ui,sans-serif">Rendering diagram...</div>';
+    // Renders run ONE AT A TIME (parallel renders delete each other's temporary elements).
+    _mmdQueue = _mmdQueue.then(function () {
+      if (token !== _mmdToken) return null;           // a newer render replaced this one
+      return renderMermaidInParent(art.code);
+    }).then(function (svg) {
+      if (svg === null || token !== _mmdToken) return;
+      diag.innerHTML = svg;                           // drawn directly in the page: no iframe
+    }, function (e) {
+      if (token !== _mmdToken) return;
+      const msg = e && e.message ? e.message : String(e);
+      console.error('mermaid failed:', e);
+      err.style.display = 'block';
+      err.textContent = 'Diagram could not be drawn: ' + msg + '  (ask the AI to simplify it)';
+      diag.innerHTML = '';
     });
   } else {
+    diag.innerHTML = '';
     frameEl.srcdoc = buildSrcdoc(art);
   }
   const codeEl = document.getElementById('canvas-code');
@@ -1399,7 +1411,10 @@ function renderCanvas() {
 }
 function setCanvasView(v) {
   canvasView = v;
-  document.getElementById('canvas-frame').style.display = v === 'preview' ? 'block' : 'none';
+  const cur = canvasArtifacts[canvasIndex];
+  const isDiagram = !!cur && cur.type === 'mermaid';
+  document.getElementById('canvas-frame').style.display = (v === 'preview' && !isDiagram) ? 'block' : 'none';
+  document.getElementById('canvas-diagram').style.display = (v === 'preview' && isDiagram) ? 'block' : 'none';
   document.getElementById('canvas-code').style.display = v === 'code' ? 'block' : 'none';
   document.getElementById('tab-preview').classList.toggle('active', v === 'preview');
   document.getElementById('tab-code').classList.toggle('active', v === 'code');
@@ -1410,6 +1425,8 @@ function closeCanvas() {
   p.classList.remove('open');
   p.classList.remove('fullscreen');
   document.getElementById('canvas-frame').srcdoc = '';
+  _mmdToken++;
+  document.getElementById('canvas-diagram').innerHTML = '';
 }
 function toggleCanvasFullscreen() {
   document.getElementById('canvas-panel').classList.toggle('fullscreen');
