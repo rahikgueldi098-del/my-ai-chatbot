@@ -538,7 +538,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <div id="sidebar-backdrop" onclick="toggleSidebar()"></div>
 <div id="sidebar">
 <button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
-<input type="search" id="chat-search" name="chat-filter" autocomplete="off" placeholder="Search chats..." oninput="renderSidebar()">
+<input type="text" id="chat-search" name="q-chat-filter-x" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" data-lpignore="true" data-1p-ignore data-form-type="other" placeholder="Search chats..." oninput="onChatSearchInput(event)">
 <div id="history-list"></div>
 <div class="export-box">
 <span class="export-title" id="user-email"></span>
@@ -617,8 +617,8 @@ header { padding: 10px; flex-wrap: wrap; }
 <div id="auth-modal" class="modal-overlay" style="z-index:200;">
 <div class="modal-content" style="max-width:380px;">
 <div class="modal-title" id="auth-title">🔐 Log in</div>
-<input id="auth-email" class="auth-input" type="email" placeholder="Email" autocomplete="email">
-<input id="auth-password" class="auth-input" type="password" placeholder="Password (min 6 characters)" autocomplete="current-password" onkeydown="if(event.key==='Enter') submitAuth()">
+<input id="auth-email" class="auth-input" type="email" name="email" placeholder="Email" autocomplete="username">
+<input id="auth-password" class="auth-input" type="password" name="password" placeholder="Password (min 6 characters)" autocomplete="current-password" onkeydown="if(event.key==='Enter') submitAuth()">
 <div id="auth-msg"></div>
 <button id="auth-submit" onclick="submitAuth()">Log in</button>
 <a id="auth-switch" href="#" onclick="toggleAuthMode(); return false;">No account? Sign up</a>
@@ -952,6 +952,24 @@ titleEl.replaceWith(input);
 input.focus();
 input.select();
 }
+// Autofill fires a plain "input" event with no inputType; real typing/pasting always has one.
+function onChatSearchInput(e) {
+if (!e.inputType || e.inputType === 'insertReplacementText') {
+e.target.value = '';
+}
+renderSidebar();
+}
+// Safety net: wipe any email Chrome slips into the search box after load.
+window.addEventListener('load', () => {
+const s = document.getElementById('chat-search');
+if (!s) return;
+[0, 300, 1000, 2500].forEach(t => setTimeout(() => {
+if (document.activeElement !== s && s.value.includes('@')) {
+s.value = '';
+renderSidebar();
+}
+}, t));
+});
 function renderSidebar() {
 const list = document.getElementById('history-list');
 const searchInput = document.getElementById('chat-search');
