@@ -138,6 +138,7 @@ CANVAS_HINT = (
     " For mermaid: start with flowchart TD, use short letter-only node ids,"
     " put every node label in double quotes, write edge labels as -->|Yes|,"
     " use at most 15 nodes and at most one loop back, and never use <br/>,"
+" classDef or style lines,"
     " ::: classes or parentheses inside labels."
 )
 
@@ -1318,22 +1319,48 @@ function loadMermaidParent() {
   });
   return _mermaidLoading;
 }
+// Cleans the typical things the AI writes that break Mermaid.
+function mermaidSanitize(code) {
+  var c = String(code || '').replace(/\r/g, '').trim();
+  c = c.replace(/^```(?:mermaid)?\s*/i, '').replace(/```\s*$/, '').trim();   // stray fences
+  c = c.replace(/<br\s*\/?>/gi, '\\n');                                        // <br/> -> line break
+  c = c.replace(/:::[\w-]+/g, '');                                             // ::: classes
+  c = c.replace(/^\s*classDef\s.*$/gim, '');                                   // classDef lines (no longer used)
+  c = c.replace(/^\s*class\s+[\w,\s]+\s+\w+\s*;?\s*$/gim, '');                 // "class A,B name" lines
+  c = c.replace(/^\s*%%.*$/gm, '');                                            // comments
+  // A -- Yes --> B   ==>   A -->|Yes| B
+  c = c.replace(/--\s+([^->|\n][^\n]*?)\s+-->/g, function (m, t) { return '-->|' + t.replace(/\|/g, '/') + '|'; });
+  // Quote every node label so (), :, /, &, ? never break the parser.
+  c = c.replace(/(\b[A-Za-z_][\w]*)\s*(\(\[|\[\[|\(\(|\[|\(|\{)\s*(?!")([^\]\)\}\n]*?)\s*(\]\)|\]\]|\)\)|\]|\)|\})(?=\s|$|-|;)/g,
+    function (m, id, open, text, close) {
+      text = text.replace(/"/g, "'");
+      return id + open + '"' + text + '"' + close;
+    });
+  return c.split('\n').filter(function (l) { return l.trim() !== ''; }).join('\n');
+}
+
 async function renderMermaidInParent(code) {
   const mermaid = await loadMermaidParent();
-  const stripBr = function (c) { return c.replace(/<br\s*\/?>/gi, ' '); };
-  const stripCls = function (c) { return c.replace(/:::[\w-]+/g, ''); };
-  const variants = [code, stripCls(stripBr(code))];
+  const variants = [mermaidSanitize(code), mermaidSanitize(code).replace(/^(\s*(?:flowchart|graph)\s+)(TD|TB)/m, '$1LR')];
   let lastErr = null;
   for (let i = 0; i < variants.length; i++) {
     const host = document.createElement('div');
-    host.style.cssText = 'position:fixed;left:0;top:0;width:1200px;opacity:0;pointer-events:none;z-index:-1;';
+    host.style.cssText = 'position:absolute;left:-99999px;top:0;width:1200px;visibility:hidden;';
     document.body.appendChild(host);
     try {
-      mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'default', suppressErrorRendering: true, flowchart: { htmlLabels: true, curve: 'basis' } });
-      const r = await mermaid.render('mmd' + Date.now() + '_' + i, variants[i].trim(), host);
+      // htmlLabels:false -> plain SVG <text> (no <foreignObject>), which always shows in an iframe.
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'default',
+        suppressErrorRendering: true, flowchart: { htmlLabels: false, curve: 'linear', useMaxWidth: false } });
+      const r = await mermaid.render('mmd' + Date.now() + '_' + i, variants[i], host);
       const m = /viewBox="([^"]+)"/.exec(r.svg);
-      const vb = m ? m[1].split(/\s+/).map(Number) : [];
-      if (r.svg.indexOf('NaN') === -1 && (vb.length !== 4 || (vb[2] > 20 && vb[3] > 20))) return r.svg;
+      const vb = m ? m[1].split(/[\s,]+/).map(Number) : [];
+      if (r.svg.indexOf('NaN') === -1 && vb.length === 4 && vb[2] > 20 && vb[3] > 20) {
+        // give the SVG a real pixel size so it can never collapse to 0 or stretch to a huge height
+        return r.svg.replace(/<svg\b([^>]*)>/, function (all, attrs) {
+          attrs = attrs.replace(/\s(width|height|style)="[^"]*"/g, '');
+          return '<svg' + attrs + ' width="' + Math.ceil(vb[2]) + '" height="' + Math.ceil(vb[3]) + '" style="display:block;margin:0 auto;max-width:100%;height:auto">';
+        });
+      }
       lastErr = new Error('Empty drawing');
     } catch (e) { lastErr = e; }
     finally { host.remove(); document.querySelectorAll('[id^="dmmd"]').forEach(function (n) { n.remove(); }); }
@@ -1352,7 +1379,7 @@ function renderCanvas() {
     frameEl.srcdoc = '<!doctype html><body style="font-family:system-ui,sans-serif;color:#666;padding:16px">Rendering diagram...</body>';
     renderMermaidInParent(art.code).then(function (svg) {
       if (canvasArtifacts[canvasIndex] !== art) return;
-      frameEl.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0;background:#fff}body{padding:16px;overflow:auto}svg{display:block;margin:0 auto;max-width:100%;height:auto}</style></head><body><div style="font:11px system-ui;color:#999;margin-bottom:6px">[preview v3] svg ' + svg.length + ' chars</div>' + svg + '</body></html>';
+      frameEl.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#fff}body{padding:16px;overflow:auto}</style></head><body>' + svg + '</body></html>';
       console.log('[preview v3] mermaid svg length', svg.length, svg.slice(0, 300));
     }).catch(function (e) {
       console.error('[preview v3] mermaid failed:', e);
