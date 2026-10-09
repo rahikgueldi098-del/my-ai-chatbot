@@ -135,6 +135,8 @@ CANVAS_HINT = (
     " file (for charts use Chart.js or D3 loaded from cdnjs.cloudflare.com or"
     " cdn.jsdelivr.net), ```mermaid for diagrams and flowcharts, or ```svg for"
     " vector graphics. Never split a page into several files."
+    " For mermaid: start with flowchart TD, put every node label in double quotes,"
+    " keep labels short, never use <br/> or ::: classes, and keep loops simple."
 )
 
 
@@ -1107,12 +1109,20 @@ function mergeAssets(code, cssBlocks, jsBlocks) {
   return out;
 }
 function canvasEsc(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-// Runs INSIDE the preview iframe: loads Mermaid (with CDN fallbacks), renders, and shows any error.
+// Runs INSIDE the preview iframe: loads Mermaid (newest first, older as fallback),
+// tries several layout/cleanup variants, and shows a clear message if all of them fail.
 function mermaidRunner(CODE) {
   var out = document.getElementById('out');
   var finished = false;
+  var lastErr = null;
+  function cleanup() {
+    Array.prototype.slice.call(document.body.children).forEach(function (el) {
+      if (el.id !== 'out' && el.tagName !== 'SCRIPT') el.remove();
+    });
+  }
   function fail(msg) {
     finished = true;
+    cleanup();
     out.innerHTML = '';
     var d = document.createElement('div');
     d.style.cssText = 'color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:12px;border-radius:8px;font:14px system-ui,sans-serif;white-space:pre-wrap';
@@ -1120,50 +1130,70 @@ function mermaidRunner(CODE) {
     out.appendChild(d);
     try { parent.postMessage({ canvasError: msg }, '*'); } catch (e) {}
   }
-  var urls = [
-    'https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js',
-    'https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js',
-    'https://unpkg.com/mermaid@10.9.1/dist/mermaid.min.js'
+  var versions = ['11.4.1', '10.9.1'];
+  var hosts = [
+    function (v) { return 'https://cdn.jsdelivr.net/npm/mermaid@' + v + '/dist/mermaid.min.js'; },
+    function (v) { return 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/' + v + '/mermaid.min.js'; },
+    function (v) { return 'https://unpkg.com/mermaid@' + v + '/dist/mermaid.min.js'; }
   ];
-  var configs = [
-    { flowchart: { curve: 'basis' } },
-    { flowchart: { curve: 'linear' } },
-    { flowchart: { curve: 'linear', htmlLabels: false } }
+  var fixes = [
+    function (c) { return c.replace(/<br\s*\/?>/gi, '<br/>'); },
+    function (c) { return c.replace(/<br\s*\/?>/gi, ' ').replace(/:::\w+/g, ''); }
   ];
-  function tryRender(n, lastErr) {
-    if (n >= configs.length) {
-      fail('Diagram syntax error:\n' + (lastErr && lastErr.message ? lastErr.message : lastErr));
-      return;
-    }
+  var curves = ['basis', 'linear'];
+  var attempts = [];
+  curves.forEach(function (c) {
+    fixes.forEach(function (f) { attempts.push({ curve: c, fix: f }); });
+  });
+  function run(vi, ai) {
+    if (ai >= attempts.length) { loadVersion(vi + 1); return; }
+    var a = attempts[ai];
     try {
-      var cfg = { startOnLoad: false, securityLevel: 'loose', theme: 'default' };
-      cfg.flowchart = configs[n].flowchart;
-      mermaid.initialize(cfg);
-      var code = CODE.replace(/<br\s*>/gi, '<br/>').trim();
-      mermaid.render('diagram' + Date.now() + '_' + n, code).then(function (r) {
+      window.mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'loose',
+        theme: 'default',
+        flowchart: { curve: a.curve, htmlLabels: true }
+      });
+      window.mermaid.render('dg' + Date.now() + '_' + vi + '_' + ai, a.fix(CODE).trim()).then(function (r) {
         finished = true;
+        cleanup();
         out.innerHTML = r.svg;
       }).catch(function (e) {
-        document.querySelectorAll('[id^="ddiagram"],[id^="diagram"]').forEach(function (el) {
-          if (el.parentNode === document.body) el.remove();
-        });
-        tryRender(n + 1, e);
+        lastErr = e;
+        cleanup();
+        run(vi, ai + 1);
       });
     } catch (e) {
-      tryRender(n + 1, e);
+      lastErr = e;
+      cleanup();
+      run(vi, ai + 1);
     }
   }
-  function render() { tryRender(0, null); }
-  function load(i) {
-    if (i >= urls.length) { fail('Could not load the Mermaid library (CDN blocked or no connection).'); return; }
+  function loadScript(v, hi, done) {
+    if (hi >= hosts.length) { done(false); return; }
     var s = document.createElement('script');
-    s.src = urls[i];
-    s.onload = render;
-    s.onerror = function () { load(i + 1); };
+    s.src = hosts[hi](v);
+    s.onload = function () { done(true); };
+    s.onerror = function () { s.remove(); loadScript(v, hi + 1, done); };
     document.head.appendChild(s);
   }
-  setTimeout(function () { if (!finished) fail('The diagram took too long to render. Try again or check your connection.'); }, 15000);
-  load(0);
+  function loadVersion(vi) {
+    if (vi >= versions.length) {
+      if (lastErr) {
+        fail('Diagram error:\n' + (lastErr.message ? lastErr.message : lastErr) + '\n\nThe diagram code itself needs simplifying: ask the AI to redraw it with simpler labels and fewer loops.');
+      } else {
+        fail('Could not load the Mermaid library (CDN blocked or no connection).');
+      }
+      return;
+    }
+    try { window.mermaid = undefined; } catch (e) {}
+    loadScript(versions[vi], 0, function (ok) {
+      if (ok && window.mermaid) run(vi, 0); else loadVersion(vi + 1);
+    });
+  }
+  setTimeout(function () { if (!finished) fail('The diagram took too long to render. Try again or check your connection.'); }, 30000);
+  loadVersion(0);
 }
 function buildSrcdoc(art) {
   const storageShim = '(function(){function mk(){var d={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v)},removeItem:function(k){delete d[k]},clear:function(){d={}},key:function(i){return Object.keys(d)[i]||null},get length(){return Object.keys(d).length}}}try{Object.defineProperty(window,"localStorage",{value:mk(),configurable:true});Object.defineProperty(window,"sessionStorage",{value:mk(),configurable:true})}catch(e){}})();';
