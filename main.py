@@ -538,7 +538,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <div id="sidebar-backdrop" onclick="toggleSidebar()"></div>
 <div id="sidebar">
 <button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
-<input type="text" id="chat-search" placeholder="Search chats..." oninput="renderSidebar()">
+<input type="search" id="chat-search" name="chat-filter" autocomplete="off" placeholder="Search chats..." oninput="renderSidebar()">
 <div id="history-list"></div>
 <div class="export-box">
 <span class="export-title" id="user-email"></span>
