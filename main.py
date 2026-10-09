@@ -1125,20 +1125,35 @@ function mermaidRunner(CODE) {
     'https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js',
     'https://unpkg.com/mermaid@10.9.1/dist/mermaid.min.js'
   ];
-  function render() {
+  var configs = [
+    { flowchart: { curve: 'basis' } },
+    { flowchart: { curve: 'linear' } },
+    { flowchart: { curve: 'linear', htmlLabels: false } }
+  ];
+  function tryRender(n, lastErr) {
+    if (n >= configs.length) {
+      fail('Diagram syntax error:\n' + (lastErr && lastErr.message ? lastErr.message : lastErr));
+      return;
+    }
     try {
-      mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'default' });
+      var cfg = { startOnLoad: false, securityLevel: 'loose', theme: 'default' };
+      cfg.flowchart = configs[n].flowchart;
+      mermaid.initialize(cfg);
       var code = CODE.replace(/<br\s*>/gi, '<br/>').trim();
-      mermaid.render('diagram' + Date.now(), code).then(function (r) {
+      mermaid.render('diagram' + Date.now() + '_' + n, code).then(function (r) {
         finished = true;
         out.innerHTML = r.svg;
       }).catch(function (e) {
-        fail('Diagram syntax error:\n' + (e && e.message ? e.message : e));
+        document.querySelectorAll('[id^="ddiagram"],[id^="diagram"]').forEach(function (el) {
+          if (el.parentNode === document.body) el.remove();
+        });
+        tryRender(n + 1, e);
       });
     } catch (e) {
-      fail('Diagram error: ' + (e && e.message ? e.message : e));
+      tryRender(n + 1, e);
     }
   }
+  function render() { tryRender(0, null); }
   function load(i) {
     if (i >= urls.length) { fail('Could not load the Mermaid library (CDN blocked or no connection).'); return; }
     var s = document.createElement('script');
