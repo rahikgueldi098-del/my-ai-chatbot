@@ -127,6 +127,17 @@ def require_user(authorization: Optional[str] = Header(None)) -> AuthUser:
     return auth_user
 
 
+# Added to every chat so the answer can be shown in the live preview panel.
+CANVAS_HINT = (
+    " When the user asks for a web page, app, UI, game, chart, diagram or"
+    " visualization, reply with ONE complete, self-contained code block so it can"
+    " be previewed live: ```html with all CSS and JavaScript inline in a single"
+    " file (for charts use Chart.js or D3 loaded from cdnjs.cloudflare.com or"
+    " cdn.jsdelivr.net), ```mermaid for diagrams and flowcharts, or ```svg for"
+    " vector graphics. Never split a page into several files."
+)
+
+
 # --- Request Models ---
 class AuthRequest(BaseModel):
     email: str
@@ -502,6 +513,25 @@ header { padding: 10px; flex-wrap: wrap; }
 #auth-submit { background: #fff; color: #000; border: none; border-radius: 8px; padding: 12px; font-weight: 600; cursor: pointer; font-size: 1rem; }
 #auth-switch { color: #38bdf8; font-size: 0.85rem; text-align: center; cursor: pointer; text-decoration: none; }
 #user-email { text-transform: none; word-break: break-all; }
+
+#canvas-panel { display: none; width: 46%; min-width: 320px; max-width: 920px; flex-shrink: 0; background: #171717; border-left: 1px solid #333; flex-direction: column; height: 100vh; height: 100dvh; }
+#canvas-panel.open { display: flex; }
+#canvas-panel.fullscreen { position: fixed; inset: 0; width: 100%; max-width: none; z-index: 90; }
+.canvas-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #333; flex-wrap: wrap; }
+.canvas-title { font-weight: 600; font-size: 0.9rem; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#canvas-select { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 6px; padding: 4px 8px; font-size: 0.8rem; max-width: 160px; }
+.canvas-tabs { display: flex; border: 1px solid #424242; border-radius: 6px; overflow: hidden; }
+.canvas-tab { background: #2f2f2f; color: #aaa; border: none; padding: 5px 12px; font-size: 0.8rem; cursor: pointer; }
+.canvas-tab.active { background: #fff; color: #000; font-weight: 600; }
+.canvas-btn { background: #2f2f2f; color: #ddd; border: 1px solid #424242; border-radius: 6px; padding: 5px 9px; font-size: 0.8rem; cursor: pointer; }
+.canvas-btn:hover { background: #383838; color: #fff; }
+#canvas-error { display: none; background: #450a0a; color: #fca5a5; font-size: 0.8rem; padding: 6px 12px; border-bottom: 1px solid #7f1d1d; }
+#canvas-body { flex: 1; min-height: 0; position: relative; background: #fff; }
+#canvas-frame { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+#canvas-code { display: none; position: absolute; inset: 0; overflow: auto; margin: 0; padding: 14px; background: #0d1117; color: #e6edf3; font-size: 0.82rem; line-height: 1.5; font-family: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace; white-space: pre; tab-size: 2; }
+@media (max-width: 768px) {
+#canvas-panel.open { position: fixed; inset: 0; width: 100%; max-width: none; z-index: 60; }
+}
 </style>
 </head>
 <body>
@@ -563,6 +593,25 @@ header { padding: 10px; flex-wrap: wrap; }
 <textarea id="user-input" placeholder="Ask AI Assistant... (Shift + Enter for new line)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
 <button id="send-btn" onclick="handleSendOrStop()">Send</button>
 </div>
+</div>
+</div>
+<div id="canvas-panel">
+<div class="canvas-head">
+<span class="canvas-title" id="canvas-title">Preview</span>
+<select id="canvas-select" onchange="selectCanvasArtifact(this.value)" style="display:none;"></select>
+<div class="canvas-tabs">
+<button class="canvas-tab active" id="tab-preview" onclick="setCanvasView('preview')">Preview</button>
+<button class="canvas-tab" id="tab-code" onclick="setCanvasView('code')">Code</button>
+</div>
+<button class="canvas-btn" id="canvas-copy" onclick="copyCanvasCode()" title="Copy code">📋</button>
+<button class="canvas-btn" onclick="downloadCanvas()" title="Download file">⬇</button>
+<button class="canvas-btn" onclick="toggleCanvasFullscreen()" title="Full screen">⛶</button>
+<button class="canvas-btn" onclick="closeCanvas()" title="Close">✕</button>
+</div>
+<div id="canvas-error"></div>
+<div id="canvas-body">
+<iframe id="canvas-frame" sandbox="allow-scripts allow-forms allow-modals allow-popups" referrerpolicy="no-referrer" title="Live preview"></iframe>
+<pre id="canvas-code"></pre>
 </div>
 </div>
 <div id="auth-modal" class="modal-overlay" style="z-index:200;">
@@ -938,6 +987,7 @@ list.appendChild(item);
 function renderChatBox() {
 const box = document.getElementById('chat-box');
 if (!box) return;
+closeCanvas();
 box.innerHTML = '';
 if (!Array.isArray(currentHistory)) return;
 currentHistory.forEach((msg) => {
@@ -980,6 +1030,168 @@ box.appendChild(msgDiv);
 box.scrollTop = box.scrollHeight;
 return msgDiv;
 }
+// ===== Live preview panel (Canvas) =====
+let canvasArtifacts = [];
+let canvasIndex = 0;
+let canvasView = 'preview';
+const CANVAS_LABELS = { html: 'HTML page', svg: 'SVG', mermaid: 'Diagram', markdown: 'Document' };
+function extractArtifacts(text) {
+  const blocks = [];
+  const re = /```([^\n`]*)\n([\s\S]*?)```/g;
+  let m;
+  while ((m = re.exec(text || '')) !== null) {
+    blocks.push({ lang: (m[1] || '').trim().split(/\s+/)[0].toLowerCase(), code: m[2].replace(/\s+$/, '') });
+  }
+  const css = blocks.filter(b => b.lang === 'css').map(b => b.code);
+  const js = blocks.filter(b => ['javascript', 'js'].includes(b.lang)).map(b => b.code);
+  const arts = [];
+  let first = true;
+  blocks.forEach(b => {
+    const c = b.code.trim();
+    let type = null;
+    if (b.lang === 'mermaid') type = 'mermaid';
+    else if (b.lang === 'svg' || ((b.lang === 'html' || b.lang === 'xml') && /^<svg[\s>]/i.test(c))) type = 'svg';
+    else if (['html', 'htm', 'xhtml'].includes(b.lang) || (!b.lang && /^<!doctype html|^<html[\s>]/i.test(c))) type = 'html';
+    else if (b.lang === 'markdown' || b.lang === 'md') type = 'markdown';
+    if (!type || !c) return;
+    let code = b.code;
+    if (type === 'html' && first) { code = mergeAssets(code, css, js); }
+    if (type === 'html') first = false;
+    arts.push({ type: type, code: code, label: CANVAS_LABELS[type] });
+  });
+  return arts;
+}
+function mergeAssets(code, cssBlocks, jsBlocks) {
+  let out = code;
+  const isLocal = u => !/^(https?:)?\/\//i.test(u) && !/^data:/i.test(u);
+  let removedCss = false, removedJs = false;
+  if (cssBlocks.length) {
+    out = out.replace(/<link\b[^>]*>/gi, tag => {
+      const h = tag.match(/href=["']([^"']+)["']/i);
+      if (/rel=["']?stylesheet/i.test(tag) && h && isLocal(h[1])) { removedCss = true; return ''; }
+      return tag;
+    });
+  }
+  if (jsBlocks.length) {
+    out = out.replace(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>\s*<\/script>/gi, (tag, u) => {
+      if (isLocal(u)) { removedJs = true; return ''; }
+      return tag;
+    });
+  }
+  if (cssBlocks.length && (removedCss || !/<style[\s>]/i.test(out))) {
+    const tag = '<style>\n' + cssBlocks.join('\n') + '\n</style>';
+    out = /<\/head>/i.test(out) ? out.replace(/<\/head>/i, tag + '\n</head>') : tag + '\n' + out;
+  }
+  if (jsBlocks.length && (removedJs || !/<script\b(?![^>]*\bsrc=)[^>]*>/i.test(out))) {
+    const tag = '<script>\n' + jsBlocks.join('\n') + '\n<\/script>';
+    out = /<\/body>/i.test(out) ? out.replace(/<\/body>/i, tag + '\n</body>') : out + '\n' + tag;
+  }
+  return out;
+}
+function canvasEsc(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function buildSrcdoc(art) {
+  const errHook = '<script>window.addEventListener("error",function(e){parent.postMessage({canvasError:String(e.message||"Script error")},"*")});<\/script>';
+  const head = '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
+  if (art.type === 'html') {
+    let doc = art.code;
+    if (!/<html[\s>]/i.test(doc) && !/<!doctype/i.test(doc)) {
+      doc = '<!doctype html><html><head>' + head + '</head><body>' + doc + '</body></html>';
+    }
+    if (/<head[^>]*>/i.test(doc)) return doc.replace(/<head[^>]*>/i, m => m + errHook);
+    if (/<html[^>]*>/i.test(doc)) return doc.replace(/<html[^>]*>/i, m => m + '<head>' + errHook + '</head>');
+    return doc;
+  }
+  if (art.type === 'svg') {
+    return '<!doctype html><html><head>' + head + '<style>html,body{margin:0;height:100%}body{display:flex;align-items:center;justify-content:center;background:#fff}svg{max-width:100%;max-height:100%;height:auto}</style></head><body>' + art.code + '</body></html>';
+  }
+  if (art.type === 'mermaid') {
+    return '<!doctype html><html><head>' + head + '<style>body{margin:0;padding:16px;background:#fff;font-family:system-ui,sans-serif}</style>' + errHook + '</head><body><pre class="mermaid">' + canvasEsc(art.code) + '</pre><script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"><\/script><script>mermaid.initialize({startOnLoad:true,securityLevel:"strict"});<\/script></body></html>';
+  }
+  const body = safeParseMarkdown(art.code);
+  return '<!doctype html><html><head>' + head + '<style>body{max-width:760px;margin:0 auto;padding:24px 20px;font-family:system-ui,sans-serif;line-height:1.65;color:#1f2328;background:#fff}pre{background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto}code{background:#f6f8fa;padding:2px 5px;border-radius:4px}table{border-collapse:collapse}td,th{border:1px solid #d0d7de;padding:6px 10px}blockquote{border-left:4px solid #d0d7de;margin:0;padding-left:14px;color:#57606a}img{max-width:100%}</style></head><body>' + body + '</body></html>';
+}
+function openCanvas(arts, idx) {
+  canvasArtifacts = arts;
+  canvasIndex = idx || 0;
+  const sel = document.getElementById('canvas-select');
+  sel.innerHTML = arts.map((a, i) => `<option value="${i}">${i + 1}. ${canvasEsc(a.label)}</option>`).join('');
+  sel.value = String(canvasIndex);
+  sel.style.display = arts.length > 1 ? '' : 'none';
+  document.getElementById('canvas-panel').classList.add('open');
+  renderCanvas();
+}
+function selectCanvasArtifact(i) {
+  canvasIndex = parseInt(i, 10) || 0;
+  renderCanvas();
+}
+function renderCanvas() {
+  const art = canvasArtifacts[canvasIndex];
+  if (!art) return;
+  document.getElementById('canvas-title').textContent = art.label + ' preview';
+  const err = document.getElementById('canvas-error');
+  err.style.display = 'none';
+  err.textContent = '';
+  document.getElementById('canvas-frame').srcdoc = buildSrcdoc(art);
+  const codeEl = document.getElementById('canvas-code');
+  const lang = art.type === 'markdown' ? 'markdown' : (art.type === 'mermaid' ? 'plaintext' : 'xml');
+  try { codeEl.innerHTML = window.hljs ? window.hljs.highlight(art.code, { language: lang }).value : canvasEsc(art.code); }
+  catch (e) { codeEl.textContent = art.code; }
+  setCanvasView(canvasView);
+}
+function setCanvasView(v) {
+  canvasView = v;
+  document.getElementById('canvas-frame').style.display = v === 'preview' ? 'block' : 'none';
+  document.getElementById('canvas-code').style.display = v === 'code' ? 'block' : 'none';
+  document.getElementById('tab-preview').classList.toggle('active', v === 'preview');
+  document.getElementById('tab-code').classList.toggle('active', v === 'code');
+}
+function closeCanvas() {
+  const p = document.getElementById('canvas-panel');
+  if (!p) return;
+  p.classList.remove('open');
+  p.classList.remove('fullscreen');
+  document.getElementById('canvas-frame').srcdoc = '';
+}
+function toggleCanvasFullscreen() {
+  document.getElementById('canvas-panel').classList.toggle('fullscreen');
+}
+function copyCanvasCode() {
+  const art = canvasArtifacts[canvasIndex];
+  if (!art) return;
+  const btn = document.getElementById('canvas-copy');
+  try { navigator.clipboard.writeText(art.code); } catch (e) {}
+  btn.textContent = '✅';
+  setTimeout(() => { btn.textContent = '📋'; }, 1500);
+}
+function downloadCanvas() {
+  const art = canvasArtifacts[canvasIndex];
+  if (!art) return;
+  const isDoc = art.type === 'markdown';
+  const ext = art.type === 'svg' ? 'svg' : (art.type === 'mermaid' ? 'mmd' : (isDoc ? 'md' : 'html'));
+  const content = art.type === 'html' ? buildSrcdoc(art) : art.code;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+  a.download = 'preview_' + Date.now() + '.' + ext;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+function autoOpenCanvas(text) {
+  const arts = extractArtifacts(text);
+  const idx = arts.findIndex(a =>
+    a.type === 'mermaid' || a.type === 'svg' ||
+    (a.type === 'html' && (/<!doctype|<html[\s>]|<script|<canvas|<style/i.test(a.code) || a.code.length > 600)));
+  if (idx >= 0) openCanvas(arts, idx);
+}
+window.addEventListener('message', (ev) => {
+  const frame = document.getElementById('canvas-frame');
+  if (!frame || ev.source !== frame.contentWindow) return;
+  if (ev.data && ev.data.canvasError) {
+    const err = document.getElementById('canvas-error');
+    err.textContent = '⚠ Error in the preview: ' + ev.data.canvasError + '  (ask the AI to fix it)';
+    err.style.display = 'block';
+  }
+});
 function addMessageActions(msgDiv, text, metaObj) {
 const words = text.trim().split(/\s+/).filter(Boolean).length;
 const readTime = Math.max(1, Math.ceil(words / 200));
@@ -999,6 +1211,14 @@ const metaInfo = document.createElement('span');
 metaInfo.className = 'msg-meta';
 metaInfo.innerText = `${words} words • ~${estTokens} tokens ($${estCost.toFixed(5)}) • ~${readTime} min read`;
 metaSpan.appendChild(copyBtn);
+const arts = extractArtifacts(text);
+arts.forEach((a, i) => {
+const pb = document.createElement('button');
+pb.className = 'action-btn';
+pb.innerText = '▶ ' + (arts.length > 1 ? (i + 1) + '. ' + a.label : 'Preview ' + a.label);
+pb.onclick = () => openCanvas(arts, i);
+metaSpan.appendChild(pb);
+});
 metaSpan.appendChild(metaInfo);
 msgDiv.appendChild(metaSpan);
 }
@@ -1207,6 +1427,7 @@ box.scrollTop = box.scrollHeight;
 if (fullText.trim()) {
 currentHistory.push({ role: 'model', content: fullText });
 addMessageActions(botMsgDiv, fullText);
+autoOpenCanvas(fullText);
 const activeChat = chats.find(c => c.id === currentChatId);
 if (activeChat && (activeChat.title === 'New Discussion' || !activeChat.title)) {
 activeChat.title = text ? (text.slice(0, 30) + (text.length > 30 ? '...' : '')) : 'New Discussion';
@@ -1752,7 +1973,9 @@ def chat_endpoint(
         # Only keep the most recent messages -> much faster on long chats.
         history = (body.history or [])[-MAX_HISTORY_MESSAGES:]
         file_payload = body.file
-        system_instruction = body.system_instruction or "You are a helpful assistant."
+        system_instruction = (
+            body.system_instruction or "You are a helpful assistant."
+        ) + CANVAS_HINT
         web_search = body.web_search
 
         api_key = os.environ.get("GEMINI_API_KEY")
