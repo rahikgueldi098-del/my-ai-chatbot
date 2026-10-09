@@ -1158,14 +1158,33 @@ function mermaidRunner(CODE) {
     return c.replace(/^(\s*(?:flowchart|graph)\s+)(TD|TB)\b/m, '$1LR');
   }
 
+  // Remove edge labels completely (last resort: keeps the structure, loses "Yes"/"No").
+  function dropLabels(c) {
+    return c.split('\n').map(function (line) {
+      if (/^\s*%%/.test(line)) return line;
+      return line.replace(/\s+--\s+[^>]+?\s+-->/g, ' -->').replace(/-->\s*\|[^|]*\|/g, '-->');
+    }).join('\n');
+  }
+  // True only if the drawing really exists (Mermaid can "succeed" with an empty/NaN drawing).
+  function drawingLooksOk() {
+    var svg = out.querySelector('svg');
+    if (!svg) return false;
+    var html = svg.outerHTML;
+    if (/viewBox="[^"]*NaN/.test(html) || /transform="[^"]*NaN/.test(html)) return false;
+    var r = svg.getBoundingClientRect();
+    if (!(r.width > 20 && r.height > 20)) return false;
+    if (/^\s*(flowchart|graph)\b/m.test(CODE) && svg.querySelectorAll('.node').length === 0) return false;
+    return true;
+  }
   var fixes = [
     function (c) { return c.replace(/<br\s*\/?>/gi, '<br/>'); },
     function (c) { return stripClasses(stripBr(c)); },
     function (c) { return stripClasses(stripBr(c)); },
     function (c) { return labelsToNodes(stripClasses(stripBr(c))); },
-    function (c) { return flipDir(labelsToNodes(stripClasses(stripBr(c)))); }
+    function (c) { return flipDir(labelsToNodes(stripClasses(stripBr(c)))); },
+    function (c) { return dropLabels(stripClasses(stripBr(c))); }
   ];
-  var curves = ['basis', 'basis', 'linear', 'linear', 'linear'];
+  var curves = ['basis', 'basis', 'linear', 'linear', 'linear', 'linear'];
   var attempts = fixes.map(function (f, i) { return { curve: curves[i], fix: f }; });
   function run(vi, ai) {
     if (ai >= attempts.length) { loadVersion(vi + 1); return; }
@@ -1179,9 +1198,15 @@ function mermaidRunner(CODE) {
         flowchart: { curve: a.curve, htmlLabels: true }
       });
       window.mermaid.render('dg' + Date.now() + '_' + vi + '_' + ai, a.fix(CODE).trim()).then(function (r) {
-        finished = true;
         cleanup();
         out.innerHTML = r.svg;
+        if (!drawingLooksOk()) {
+          lastErr = new Error('Mermaid produced an empty drawing (attempt ' + (ai + 1) + ').');
+          out.innerHTML = '';
+          run(vi, ai + 1);
+          return;
+        }
+        finished = true;
       }).catch(function (e) {
         lastErr = e;
         cleanup();
