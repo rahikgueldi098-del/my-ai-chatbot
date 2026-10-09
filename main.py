@@ -530,6 +530,9 @@ header { padding: 10px; flex-wrap: wrap; }
 .canvas-tab.active { background: #fff; color: #000; font-weight: 600; }
 .canvas-btn { background: #2f2f2f; color: #ddd; border: 1px solid #424242; border-radius: 6px; padding: 5px 9px; font-size: 0.8rem; cursor: pointer; }
 .canvas-btn:hover { background: #383838; color: #fff; }
+#canvas-error { align-items: center; gap: 10px; }
+#canvas-error .fix-btn { background: #fff; color: #7f1d1d; border: none; border-radius: 6px; padding: 4px 10px; font-size: 0.78rem; font-weight: 600; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+#canvas-error .fix-btn:hover { background: #fee2e2; }
 #canvas-error { display: none; background: #450a0a; color: #fca5a5; font-size: 0.8rem; padding: 6px 12px; border-bottom: 1px solid #7f1d1d; }
 #canvas-body { flex: 1; min-height: 0; position: relative; background: #fff; }
 #canvas-frame { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
@@ -614,7 +617,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <button class="canvas-btn" onclick="toggleCanvasFullscreen()" title="Full screen">⛶</button>
 <button class="canvas-btn" onclick="closeCanvas()" title="Close">✕</button>
 </div>
-<div id="canvas-error"></div>
+<div id="canvas-error"><span id="canvas-error-text" style="flex:1;min-width:0;"></span><button class="fix-btn" onclick="fixCanvasWithAI()">🛠 Fix with AI</button></div>
 <div id="canvas-body">
 <iframe id="canvas-frame" sandbox="allow-scripts allow-forms allow-modals allow-popups" referrerpolicy="no-referrer" title="Live preview"></iframe>
 <div id="canvas-diagram"></div>
@@ -1369,15 +1372,40 @@ async function renderMermaidInParent(code) {
   }
   throw lastErr || new Error('Diagram failed');
 }
+let _canvasLastError = '';
+function showCanvasError(shown, raw) {
+  _canvasLastError = String(raw || shown);
+  document.getElementById('canvas-error-text').textContent = shown;
+  document.getElementById('canvas-error').style.display = 'flex';
+}
+function hideCanvasError() {
+  _canvasLastError = '';
+  document.getElementById('canvas-error').style.display = 'none';
+  document.getElementById('canvas-error-text').textContent = '';
+}
+// Sends the broken code + the error back to the AI as a normal chat message.
+function fixCanvasWithAI() {
+  const art = canvasArtifacts[canvasIndex];
+  if (!art || isStreaming) return;
+  const input = document.getElementById('user-input');
+  if (!input) return;
+  const lang = art.type === 'mermaid' ? 'mermaid' : (art.type === 'markdown' ? 'markdown' : art.type);
+  const code = art.code.length > 12000 ? art.code.slice(0, 12000) + '\n... (truncated)' : art.code;
+  const tick = String.fromCharCode(96, 96, 96);
+  input.value = 'The ' + art.label + ' you wrote does not work in the preview.\n\nError: ' + _canvasLastError +
+    '\n\nHere is the code:\n' + tick + lang + '\n' + code + '\n' + tick +
+    '\n\nPlease fix it and reply with ONE complete corrected ' + tick + lang + ' code block' +
+    (art.type === 'mermaid' ? ' (simpler labels, fewer loops).' : '.');
+  if (typeof autoExpand === 'function') autoExpand(input);
+  sendMessage();
+}
 let _mmdToken = 0;
 let _mmdQueue = Promise.resolve();
 function renderCanvas() {
   const art = canvasArtifacts[canvasIndex];
   if (!art) return;
   document.getElementById('canvas-title').textContent = art.label + ' preview';
-  const err = document.getElementById('canvas-error');
-  err.style.display = 'none';
-  err.textContent = '';
+  hideCanvasError();
   const frameEl = document.getElementById('canvas-frame');
   const diag = document.getElementById('canvas-diagram');
   const token = ++_mmdToken;
@@ -1395,8 +1423,7 @@ function renderCanvas() {
       if (token !== _mmdToken) return;
       const msg = e && e.message ? e.message : String(e);
       console.error('mermaid failed:', e);
-      err.style.display = 'block';
-      err.textContent = 'Diagram could not be drawn: ' + msg + '  (ask the AI to simplify it)';
+      showCanvasError('Diagram could not be drawn: ' + msg, msg);
       diag.innerHTML = '';
     });
   } else {
@@ -1463,9 +1490,7 @@ window.addEventListener('message', (ev) => {
   const frame = document.getElementById('canvas-frame');
   if (!frame || ev.source !== frame.contentWindow) return;
   if (ev.data && ev.data.canvasError) {
-    const err = document.getElementById('canvas-error');
-    err.textContent = '⚠ Error in the preview: ' + ev.data.canvasError + '  (ask the AI to fix it)';
-    err.style.display = 'block';
+    showCanvasError('⚠ Error in the preview: ' + ev.data.canvasError, ev.data.canvasError);
   }
 });
 function addMessageActions(msgDiv, text, metaObj) {
