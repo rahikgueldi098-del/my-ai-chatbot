@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from supabase import Client, create_client
 
@@ -640,6 +640,15 @@ def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
         except Exception:
             pass
         raise
+    # Keep the original file so the user can open it later by clicking it.
+    try:
+        user.db.table("document_files").insert({
+            "document_id": doc["id"],
+            "user_id": user.id,
+            "data": file_payload["data"],
+        }).execute()
+    except Exception as ex:
+        print("Could not keep the original file:", ex)
     return {"id": doc["id"], "name": name, "chunks": len(chunks)}
 
 
@@ -741,6 +750,7 @@ header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justi
 .model { align-self: flex-start; background-color: #212121; color: #ececec; border-bottom-left-radius: 2px; border: 1px solid #333; width: 100%; }
 .message img { max-width: 100%; border-radius: 8px; margin-top: 8px; }
 .message pre { overflow-x: auto; background: #171717; padding: 10px; border-radius: 8px; margin: 8px 0; }
+.doc-badge:hover { background: #273449; }
 .doc-badge { display: inline-flex; align-items: center; gap: 8px; background: #1e293b; border: 1px solid #334155; padding: 8px 12px; border-radius: 8px; margin-bottom: 6px; font-size: 0.88rem; color: #38bdf8; }
 .message p { margin-bottom: 8px; }
 .message p:last-child { margin-bottom: 0; }
@@ -1342,6 +1352,28 @@ appendMessageUI(role, content, msg.file_payload || msg.file, msg.meta);
 });
 box.scrollTop = box.scrollHeight;
 }
+async function openAttachment(fileObj) {
+  const w = window.open('', '_blank');
+  try {
+    let blob;
+    if (fileObj.data) {
+      blob = await (await fetch(fileObj.data)).blob();
+    } else if (fileObj.doc_id) {
+      const res = await fetch(`/api/documents/${fileObj.doc_id}/file`, { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      blob = await res.blob();
+    } else {
+      throw new Error('not stored');
+    }
+    if (fileObj.type && blob.type !== fileObj.type) blob = new Blob([blob], { type: fileObj.type });
+    const url = URL.createObjectURL(blob);
+    if (w) w.location.href = url; else window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    if (w) w.close();
+    alert('The original file is not available (it was attached before this feature existed).');
+  }
+}
 function appendMessageUI(role, text, fileObj, metaObj) {
 const box = document.getElementById('chat-box');
 if (!box) return;
@@ -1351,11 +1383,16 @@ if (fileObj) {
 if (fileObj.type && fileObj.type.startsWith('image/')) {
 const img = document.createElement('img');
 img.src = fileObj.data;
+img.style.cursor = 'pointer';
+img.onclick = () => openAttachment(fileObj);
 msgDiv.appendChild(img);
 } else {
 const badge = document.createElement('div');
 badge.className = 'doc-badge';
 badge.innerHTML = `📄 <strong>${escapeHtml(fileObj.name)}</strong>`;
+badge.title = 'Click to open';
+badge.style.cursor = 'pointer';
+badge.onclick = () => openAttachment(fileObj);
 msgDiv.appendChild(badge);
 }
 }
@@ -2146,8 +2183,13 @@ const del = document.createElement('button');
 del.className = 'doc-del';
 del.textContent = '🗑 Delete';
 del.onclick = () => deleteDoc(d.id, del);
+const view = document.createElement('button');
+view.className = 'doc-del';
+view.textContent = '👁 View';
+view.onclick = () => openAttachment({ doc_id: d.id, type: d.mime_type });
 row.appendChild(icon);
 row.appendChild(info);
+row.appendChild(view);
 row.appendChild(del);
 box.appendChild(row);
 });
@@ -2445,6 +2487,22 @@ def delete_document(doc_id: str, user: AuthUser = Depends(require_user)):
         return JSONResponse({"status": "deleted"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/documents/{doc_id}/file")
+def get_document_file(doc_id: str, user: AuthUser = Depends(require_user)):
+    try:
+        doc = (user.db.table("documents").select("mime_type")
+               .eq("id", doc_id).eq("user_id", user.id).limit(1).execute().data)
+        f = (user.db.table("document_files").select("data")
+             .eq("document_id", doc_id).limit(1).execute().data)
+        if not doc or not f:
+            return JSONResponse({"detail": "Original file not stored."}, status_code=404)
+        file_bytes, _, _ = decode_file({"data": f[0]["data"]})
+        return Response(content=file_bytes,
+                        media_type=doc[0].get("mime_type") or "application/octet-stream")
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 def is_admin(user: AuthUser) -> bool:
     # If ADMIN_EMAILS is not set, every logged-in user counts as admin.
@@ -2752,6 +2810,7 @@ def chat_endpoint(
                     k: file_payload.get(k) for k in ("name", "type", "size")
                 }
                 saved_file_payload["indexed"] = True
+                saved_file_payload["doc_id"] = indexed_doc["id"]
             except Exception as ex:
                 print("Indexing failed, sending the file inline instead:", ex)
         if RAG_ENABLED and chat_id:
