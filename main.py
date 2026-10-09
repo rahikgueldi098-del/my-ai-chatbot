@@ -1107,6 +1107,49 @@ function mergeAssets(code, cssBlocks, jsBlocks) {
   return out;
 }
 function canvasEsc(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+// Runs INSIDE the preview iframe: loads Mermaid (with CDN fallbacks), renders, and shows any error.
+function mermaidRunner(CODE) {
+  var out = document.getElementById('out');
+  var finished = false;
+  function fail(msg) {
+    finished = true;
+    out.innerHTML = '';
+    var d = document.createElement('div');
+    d.style.cssText = 'color:#b91c1c;background:#fef2f2;border:1px solid #fecaca;padding:12px;border-radius:8px;font:14px system-ui,sans-serif;white-space:pre-wrap';
+    d.textContent = msg;
+    out.appendChild(d);
+    try { parent.postMessage({ canvasError: msg }, '*'); } catch (e) {}
+  }
+  var urls = [
+    'https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js',
+    'https://unpkg.com/mermaid@10.9.1/dist/mermaid.min.js'
+  ];
+  function render() {
+    try {
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'loose', theme: 'default' });
+      var code = CODE.replace(/<br\s*>/gi, '<br/>').trim();
+      mermaid.render('diagram' + Date.now(), code).then(function (r) {
+        finished = true;
+        out.innerHTML = r.svg;
+      }).catch(function (e) {
+        fail('Diagram syntax error:\n' + (e && e.message ? e.message : e));
+      });
+    } catch (e) {
+      fail('Diagram error: ' + (e && e.message ? e.message : e));
+    }
+  }
+  function load(i) {
+    if (i >= urls.length) { fail('Could not load the Mermaid library (CDN blocked or no connection).'); return; }
+    var s = document.createElement('script');
+    s.src = urls[i];
+    s.onload = render;
+    s.onerror = function () { load(i + 1); };
+    document.head.appendChild(s);
+  }
+  setTimeout(function () { if (!finished) fail('The diagram took too long to render. Try again or check your connection.'); }, 15000);
+  load(0);
+}
 function buildSrcdoc(art) {
   const storageShim = '(function(){function mk(){var d={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v)},removeItem:function(k){delete d[k]},clear:function(){d={}},key:function(i){return Object.keys(d)[i]||null},get length(){return Object.keys(d).length}}}try{Object.defineProperty(window,"localStorage",{value:mk(),configurable:true});Object.defineProperty(window,"sessionStorage",{value:mk(),configurable:true})}catch(e){}})();';
   const errHook = '<script>' + storageShim + 'window.addEventListener("error",function(e){parent.postMessage({canvasError:String(e.message||"Script error")},"*")});<\/script>';
@@ -1124,7 +1167,8 @@ function buildSrcdoc(art) {
     return '<!doctype html><html><head>' + head + '<style>html,body{margin:0;height:100%}body{display:flex;align-items:center;justify-content:center;background:#fff}svg{max-width:100%;max-height:100%;height:auto}</style></head><body>' + art.code + '</body></html>';
   }
   if (art.type === 'mermaid') {
-    return '<!doctype html><html><head>' + head + '<style>body{margin:0;padding:16px;background:#fff;font-family:system-ui,sans-serif}</style>' + errHook + '</head><body><pre class="mermaid">' + canvasEsc(art.code) + '</pre><script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"><\/script><script>mermaid.initialize({startOnLoad:true,securityLevel:"strict"});<\/script></body></html>';
+    const codeJson = JSON.stringify(art.code).replace(/</g, '\\u003c');
+    return '<!doctype html><html><head>' + head + '<style>html,body{margin:0;background:#fff;font-family:system-ui,sans-serif}body{padding:16px;overflow:auto}#out{min-width:min-content}#out svg{max-width:100%;height:auto}</style>' + errHook + '</head><body><div id="out" style="color:#666;font-size:14px">Rendering diagram...</div><script>(' + mermaidRunner.toString() + ')(' + codeJson + ');<\/script></body></html>';
   }
   const body = safeParseMarkdown(art.code);
   return '<!doctype html><html><head>' + head + '<style>body{max-width:760px;margin:0 auto;padding:24px 20px;font-family:system-ui,sans-serif;line-height:1.65;color:#1f2328;background:#fff}pre{background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto}code{background:#f6f8fa;padding:2px 5px;border-radius:4px}table{border-collapse:collapse}td,th{border:1px solid #d0d7de;padding:6px 10px}blockquote{border-left:4px solid #d0d7de;margin:0;padding-left:14px;color:#57606a}img{max-width:100%}</style></head><body>' + body + '</body></html>';
