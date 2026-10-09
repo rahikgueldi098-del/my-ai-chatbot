@@ -52,6 +52,8 @@ FULL_CONTEXT_MAX_CHARS = int(os.environ.get("RAG_FULL_CONTEXT_MAX_CHARS", "30000
 MAX_CHUNKS_PER_DOC = int(os.environ.get("RAG_MAX_CHUNKS", "300"))
 MAX_UPLOAD_BYTES = int(os.environ.get("RAG_MAX_UPLOAD_BYTES", str(4_000_000)))
 EMBED_BATCH = 50
+# Price per 1M embedding tokens (USD). Check your embedding model's price and set it in Vercel.
+EMBEDDING_USD_PER_M = float(os.environ.get("EMBEDDING_USD_PER_M", "0.15")) / 1_000_000
 INDEXABLE_EXTS = (".pdf", ".txt", ".md", ".csv", ".json", ".py", ".js", ".html", ".css")
 _embed_pool = ThreadPoolExecutor(max_workers=4)
 
@@ -275,10 +277,13 @@ def log_analytics_entry(
     user: Any = None,
     model: Optional[str] = None,
     error: Optional[str] = None,
+    cost_usd: Optional[float] = None,
 ):
     cost = (prompt_tokens * INPUT_TOKEN_COST_USD) + (
         completion_tokens * OUTPUT_TOKEN_COST_USD
     )
+    if cost_usd is not None:  # e.g. embeddings have their own price
+        cost = cost_usd
 
     # Saved in Supabase (table api_logs) so the numbers survive restarts.
     if user is not None:
@@ -520,7 +525,40 @@ def embed_texts(client, texts: List[str], task_type: str) -> List[List[float]]:
     return out
 
 
-def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client) -> dict:
+def log_embedding_usage(user, client_ip: str, texts: List[str], started: float,
+                        error: Optional[str] = None):
+    """Write the embedding call to api_logs so the admin dashboard counts its cost."""
+    try:
+        tokens = sum(estimate_tokens(t) for t in texts)
+        log_analytics_entry(
+            "/api/embed",
+            500 if error else 200,
+            (time.time() - started) * 1000,
+            0 if error else tokens,
+            0,
+            client_ip,
+            user=user,
+            model=EMBEDDING_MODEL,
+            error=error,
+            cost_usd=0.0 if error else tokens * EMBEDDING_USD_PER_M,
+        )
+    except Exception as ex:
+        print("Failed to log embedding usage:", ex)
+
+
+def embed_and_log(client, user, client_ip: str, texts: List[str], task_type: str):
+    started = time.time()
+    try:
+        vectors = embed_texts(client, texts, task_type)
+    except Exception as ex:
+        log_embedding_usage(user, client_ip, texts, started, error=str(ex))
+        raise
+    log_embedding_usage(user, client_ip, texts, started)
+    return vectors
+
+
+def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
+                    client_ip: str = "") -> dict:
     """Extract -> chunk -> embed -> store. Raises ValueError for user-facing problems."""
     file_bytes, mime, name = decode_file(file_payload)
     if len(file_bytes) > MAX_UPLOAD_BYTES:
@@ -554,7 +592,9 @@ def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client) 
     if len(chunks) > MAX_CHUNKS_PER_DOC:
         raise ValueError("Document is too long to index.")
 
-    vectors = embed_texts(client, [c["content"] for c in chunks], "RETRIEVAL_DOCUMENT")
+    vectors = embed_and_log(
+        client, user, client_ip, [c["content"] for c in chunks], "RETRIEVAL_DOCUMENT"
+    )
 
     char_count = sum(len(t) for _, t in pages)
     full_text = None
@@ -610,21 +650,15 @@ def retrieval_query(message: str, history: List[Dict[str, Any]]) -> str:
     if not message:
         return "summary and main points of the document"
     if len(message) < 60:
-        skipped_current = False
         for h in reversed(history or []):
             content = (h.get("content") or "").strip()
-            if h.get("role") != "user" or not content:
-                continue
-            # The frontend already puts the current message at the end of the
-            # history, so skip that one and take the question before it.
-            if not skipped_current and content == message:
-                skipped_current = True
-                continue
-            return f"{content}\n{message}"
+            if h.get("role") == "user" and content:
+                return f"{content}\n{message}"
     return message
 
 
-def build_doc_context(user: "AuthUser", chat_id: str, query: str, client) -> str:
+def build_doc_context(user: "AuthUser", chat_id: str, query: str, client,
+                      client_ip: str = "") -> str:
     """Returns the document text to give Gemini ('' if the chat has no documents)."""
     docs = (
         user.db.table("documents")
@@ -644,7 +678,7 @@ def build_doc_context(user: "AuthUser", chat_id: str, query: str, client) -> str
         return "\n\n".join(f"### {d['name']}\n{d['full_text']}" for d in docs)
 
     # Larger documents: semantic search for the best chunks.
-    qvec = embed_texts(client, [query], "RETRIEVAL_QUERY")[0]
+    qvec = embed_and_log(client, user, client_ip, [query], "RETRIEVAL_QUERY")[0]
     rows = (
         user.db.rpc(
             "match_document_chunks",
@@ -755,6 +789,15 @@ header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justi
 .log-table th { background: #1a1a1a; color: #888; position: sticky; top: 0; }
 .status-200 { color: #4ade80; font-weight: 600; }
 .status-429 { color: #f87171; font-weight: 600; }
+.doc-row { display: flex; align-items: center; gap: 10px; background: #212121; border: 1px solid #333; border-radius: 8px; padding: 10px 12px; }
+.doc-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.doc-name { font-weight: 600; font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-meta { font-size: 0.75rem; color: #888; }
+.doc-del { background: transparent; border: 1px solid #424242; color: #f87171; border-radius: 6px; padding: 5px 10px; font-size: 0.8rem; cursor: pointer; white-space: nowrap; }
+.doc-del:hover { background: #450a0a; border-color: #991b1b; }
+.doc-del:disabled { opacity: 0.5; cursor: default; }
+.docs-empty { text-align: center; color: #666; font-size: 0.85rem; padding: 18px 8px; }
+.indexing-hint { color: #888; font-size: 0.85rem; }
 @media (max-width: 768px) {
 #menu-btn { display: inline-block; }
 #sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform 0.25s ease; }
@@ -828,6 +871,7 @@ header { padding: 10px; flex-wrap: wrap; }
 </div>
 <div class="header-controls">
 <button id="analytics-btn" class="admin-btn" style="display:none;" onclick="openAnalyticsModal()">📊 Analytics</button>
+<button id="docs-btn" class="toggle-btn" onclick="openDocsModal()" title="Documents indexed in this chat">📚 Documents</button>
 <button id="search-toggle" class="toggle-btn" onclick="toggleSearch()">Web Search: OFF</button>
 <select id="persona-select" onchange="handlePersonaChange(this)">
 <option value="You are a helpful, smart, and precise AI assistant.">Default Assistant</option>
@@ -891,6 +935,16 @@ header { padding: 10px; flex-wrap: wrap; }
 <div id="auth-msg"></div>
 <button id="auth-submit" onclick="submitAuth()">Log in</button>
 <a id="auth-switch" href="#" onclick="toggleAuthMode(); return false;">No account? Sign up</a>
+</div>
+</div>
+<div id="docs-modal" class="modal-overlay" onclick="if(event.target===this) closeDocsModal()">
+<div class="modal-content">
+<div class="modal-header">
+<div class="modal-title">📚 Documents in this chat</div>
+<button class="close-btn" onclick="closeDocsModal()">✕</button>
+</div>
+<div style="font-size: 0.8rem; color: #888;">PDFs and text files you attach are indexed, so the AI can search them in every message of this chat. Delete a file here to stop the AI from using it.</div>
+<div id="docs-list" style="display:flex; flex-direction:column; gap:8px;"></div>
 </div>
 </div>
 <div id="analytics-modal" class="modal-overlay" onclick="if(event.target===this) closeAnalyticsModal()">
@@ -1150,6 +1204,8 @@ currentHistory = [];
 renderSidebar();
 renderChatBox();
 closeSidebarOnMobile();
+currentDocs = [];
+updateDocsButton();
 } catch (e) {
 console.error("Failed to start new chat:", e);
 }
@@ -1169,6 +1225,7 @@ currentHistory = [];
 renderSidebar();
 renderChatBox();
 closeSidebarOnMobile();
+refreshDocs();
 }
 async function deleteChat(id, event) {
 if (event) event.stopPropagation();
@@ -1952,6 +2009,9 @@ updateSendBtnUI(true);
 activeAbortController = new AbortController();
 const botMsgDiv = appendMessageUI('model', '', null);
 const contentDiv = botMsgDiv.querySelector('.text-content');
+if (filePayload && !(filePayload.type || '').startsWith('image/')) {
+contentDiv.innerHTML = '<div class="indexing-hint">📚 Reading and indexing your document…</div>';
+}
 const systemPrompt = document.getElementById('persona-select').value;
 let fullText = '';
 try {
@@ -2008,6 +2068,7 @@ currentHistory.push({ role: 'model', content: fullText });
 isStreaming = false;
 activeAbortController = null;
 updateSendBtnUI(false);
+if (filePayload) refreshDocs();
 }
 }
 function exportChat(format) {
@@ -2025,6 +2086,93 @@ const a = document.createElement('a');
 a.href = dataStr;
 a.download = filename;
 a.click();
+}
+let currentDocs = [];
+async function refreshDocs() {
+if (!currentChatId) { currentDocs = []; updateDocsButton(); return; }
+const chatId = currentChatId;
+let docs = [];
+try {
+const res = await fetch(`/api/chats/${chatId}/documents`, { headers: getAuthHeaders() });
+if (res.ok) docs = await res.json();
+} catch (e) {}
+if (chatId !== currentChatId) return;
+currentDocs = Array.isArray(docs) ? docs : [];
+updateDocsButton();
+const modal = document.getElementById('docs-modal');
+if (modal && modal.classList.contains('open')) renderDocsList();
+}
+function updateDocsButton() {
+const btn = document.getElementById('docs-btn');
+if (!btn) return;
+const n = currentDocs.length;
+btn.innerText = n ? `📚 Documents (${n})` : '📚 Documents';
+btn.className = n ? 'toggle-btn active' : 'toggle-btn';
+}
+function fmtFileSize(bytes) {
+const b = Number(bytes || 0);
+if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+return b + ' B';
+}
+function renderDocsList() {
+const box = document.getElementById('docs-list');
+if (!box) return;
+box.innerHTML = '';
+if (!currentDocs.length) {
+const empty = document.createElement('div');
+empty.className = 'docs-empty';
+empty.textContent = 'No documents yet. Attach a PDF or text file with 📎 and it will appear here.';
+box.appendChild(empty);
+return;
+}
+currentDocs.forEach(d => {
+const row = document.createElement('div');
+row.className = 'doc-row';
+const icon = document.createElement('span');
+icon.textContent = '📄';
+const info = document.createElement('div');
+info.className = 'doc-info';
+const name = document.createElement('span');
+name.className = 'doc-name';
+name.textContent = d.name || 'file';
+const meta = document.createElement('span');
+meta.className = 'doc-meta';
+const n = Number(d.chunk_count || 0);
+meta.textContent = `${fmtFileSize(d.size_bytes)} · ${n} chunk${n === 1 ? '' : 's'}`;
+info.appendChild(name);
+info.appendChild(meta);
+const del = document.createElement('button');
+del.className = 'doc-del';
+del.textContent = '🗑 Delete';
+del.onclick = () => deleteDoc(d.id, del);
+row.appendChild(icon);
+row.appendChild(info);
+row.appendChild(del);
+box.appendChild(row);
+});
+}
+async function deleteDoc(id, btn) {
+if (!confirm('Remove this document? The AI will no longer be able to use it in this chat.')) return;
+btn.disabled = true;
+try {
+const res = await fetch(`/api/documents/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
+if (!res.ok) throw new Error('HTTP ' + res.status);
+currentDocs = currentDocs.filter(d => d.id !== id);
+updateDocsButton();
+renderDocsList();
+} catch (e) {
+btn.disabled = false;
+alert('Could not delete the document. Please try again.');
+}
+}
+function openDocsModal() {
+document.getElementById('docs-modal').classList.add('open');
+renderDocsList();
+refreshDocs();
+}
+function closeDocsModal() {
+document.getElementById('docs-modal').classList.remove('open');
 }
 function openAnalyticsModal() {
 document.getElementById('analytics-modal').classList.add('open');
@@ -2559,7 +2707,17 @@ def chat_endpoint(
         chat_id = body.chat_id
         message = body.message
         # Only keep the most recent messages -> much faster on long chats.
-        history = (body.history or [])[-MAX_HISTORY_MESSAGES:]
+        raw_history = list(body.history or [])
+        # The frontend already puts the current message at the end of the
+        # history; drop it so Gemini doesn't receive it twice.
+        if (
+            message.strip()
+            and raw_history
+            and raw_history[-1].get("role") == "user"
+            and (raw_history[-1].get("content") or "").strip() == message.strip()
+        ):
+            raw_history.pop()
+        history = raw_history[-MAX_HISTORY_MESSAGES:]
         file_payload = body.file
         system_instruction = (
             body.system_instruction or "You are a helpful assistant."
@@ -2587,7 +2745,7 @@ def chat_endpoint(
         ):
             try:
                 indexed_doc = ingest_document(
-                    user, chat_id, file_payload, get_gemini_client(api_key)
+                    user, chat_id, file_payload, get_gemini_client(api_key), client_ip
                 )
                 # Don't store the whole base64 file in the messages table.
                 saved_file_payload = {
@@ -2603,6 +2761,7 @@ def chat_endpoint(
                     chat_id,
                     retrieval_query(message, history),
                     get_gemini_client(api_key),
+                    client_ip,
                 )
                 if doc_ctx:
                     system_instruction += DOC_HINT + doc_ctx + "\n</documents>"
