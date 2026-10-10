@@ -1473,10 +1473,104 @@ CODE_HINT = (
     "\n\nCode mode is ON. For calculations, statistics, data analysis, simulations"
     " and charts, write Python and RUN it instead of guessing the result. Charts:"
     " use matplotlib (it is shown to the user automatically). Libraries: numpy,"
-    " pandas, matplotlib, scipy, sympy. The sandbox has no internet and no access"
-    " to the user's files. After the code runs, explain the result briefly in the"
-    " user's language."
+    " pandas, matplotlib, scipy, sympy. The sandbox has no internet. After the code"
+    " runs, explain the result briefly in the user's language."
 )
+
+# --- Data files (CSV, Excel, JSON, text) the user attached to this chat are handed
+# to the code sandbox as input files. ---
+CODE_DATA_EXTS = (".csv", ".tsv", ".txt", ".json", ".xlsx")
+CODE_DATA_MAX_FILE_BYTES = int(os.environ.get("CODE_DATA_MAX_FILE_BYTES", "1500000"))
+CODE_DATA_MAX_TOTAL_BYTES = int(os.environ.get("CODE_DATA_MAX_TOTAL_BYTES", "2500000"))
+CODE_DATA_MAX_FILES = 3
+
+
+def build_code_data_parts(user: "AuthUser", chat_id: str):
+    """Returns (parts, note): the data files of this chat as Gemini input parts, and a
+    sentence for the system prompt that names them. ([], '') when there are none."""
+    try:
+        try:
+            docs = (
+                user.db.table("documents")
+                .select("id,name,mime_type,size_bytes,storage_path")
+                .eq("chat_id", chat_id).order("created_at", desc=True).execute().data or []
+            )
+        except Exception:  # storage_path column not created yet
+            docs = (
+                user.db.table("documents")
+                .select("id,name,mime_type,size_bytes")
+                .eq("chat_id", chat_id).order("created_at", desc=True).execute().data or []
+            )
+    except Exception as ex:
+        print("Code mode: could not list the documents:", ex)
+        return [], ""
+    # Spreadsheet-like files first (most useful for analysis), newest first inside each kind.
+    docs = sorted(
+        docs,
+        key=lambda d: 0 if (d.get("name") or "").lower().endswith((".csv", ".tsv", ".xlsx"))
+        else 1 if (d.get("name") or "").lower().endswith(".json") else 2,
+    )
+    parts: list = []
+    names: List[str] = []
+    skipped: List[str] = []
+    total = 0
+    for d in docs:
+        name = d.get("name") or "file"
+        low = name.lower()
+        if not low.endswith(CODE_DATA_EXTS):
+            continue
+        if len(names) >= CODE_DATA_MAX_FILES:
+            skipped.append(name)
+            continue
+        size = int(d.get("size_bytes") or 0)
+        if size > CODE_DATA_MAX_FILE_BYTES or total + size > CODE_DATA_MAX_TOTAL_BYTES:
+            skipped.append(name)
+            continue
+        raw = None
+        try:
+            if d.get("storage_path"):
+                raw = storage_get(user, d["storage_path"])
+            if raw is None:
+                f = (user.db.table("document_files").select("data")
+                     .eq("document_id", d["id"]).limit(1).execute().data)
+                if f:
+                    raw = decode_file({"data": f[0]["data"]})[0]
+        except Exception as ex:
+            print("Code mode: could not read", name, ex)
+        if not raw:
+            skipped.append(name)
+            continue
+        total += len(raw)
+        if low.endswith(".xlsx"):
+            try:
+                text = _xlsx_text(raw)
+            except Exception:
+                skipped.append(name)
+                continue
+            pieces = re.split(r"(?m)^=== Sheet: (.*) ===$", text)
+            # pieces = [before, title1, body1, title2, body2, ...]
+            for i in range(1, len(pieces) - 1, 2):
+                title, body = pieces[i].strip(), pieces[i + 1].strip()
+                if body:
+                    parts.append(types.Part.from_text(text=f"[Data file: {name}, sheet '{title}', tab-separated]"))
+                    parts.append(types.Part.from_bytes(data=body.encode("utf-8"), mime_type="text/plain"))
+            names.append(f"{name} (each sheet is given as its own input)")
+        else:
+            mime = "text/csv" if low.endswith(".csv") else "text/plain"
+            parts.append(types.Part.from_text(text=f"[Data file: {name}]"))
+            parts.append(types.Part.from_bytes(data=raw, mime_type=mime))
+            names.append(name)
+    if not names:
+        return [], ""
+    note = (
+        "\n\nThe user's data files are given to you as input files right after their"
+        " message: " + ", ".join(names) + ". Load them in Python (for example pandas"
+        " read_csv with the file name; if a name does not work, read the input data"
+        " you were given) and compute from the REAL data, never invent numbers."
+    )
+    if skipped:
+        note += " These data files were too big or numerous to attach: " + ", ".join(skipped[:5]) + "."
+    return parts, note
 
 
 def stream_code_execution(client, model_name, contents, system_instruction,
@@ -1728,7 +1822,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <button id="analytics-btn" class="admin-btn" style="display:none;" onclick="openAnalyticsModal()">📊 Analytics</button>
 <button id="docs-btn" class="toggle-btn" onclick="openDocsModal()" title="Documents indexed in this chat">📚 Documents</button>
 <button id="search-toggle" class="toggle-btn" onclick="toggleSearch()">Web Search: OFF</button>
-<button id="code-toggle" class="toggle-btn" onclick="toggleCode()" title="Gemini writes and runs Python to answer (calculations, data, charts)">Run Code: OFF</button>
+<button id="code-toggle" class="toggle-btn" onclick="toggleCode()" title="Gemini writes and runs Python to answer (calculations, charts, and analysis of your attached CSV / Excel / JSON files)">Run Code: OFF</button>
 <select id="persona-select" onchange="handlePersonaChange(this)">
 <option value="You are a helpful, smart, and precise AI assistant.">Default Assistant</option>
 <option value="You are a Senior Full-Stack Software Engineer. Provide clean, efficient code and explain tech concepts concisely.">Senior Engineer</option>
@@ -4870,6 +4964,11 @@ def chat_endpoint(
             code_exec = bool(body.code_execution) and CODE_EXECUTION_ENABLED
             if code_exec:
                 system_instruction += CODE_HINT
+                if chat_id:
+                    data_parts, data_note = build_code_data_parts(user, chat_id)
+                    if data_parts:
+                        contents[-1].parts.extend(data_parts)
+                        system_instruction += data_note
             # Code mode has its own Gemini tool: custom tools and web search stay off.
             fn_tools = None if code_exec else build_function_tools(web_search)
             if fn_tools:
