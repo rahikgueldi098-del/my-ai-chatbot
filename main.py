@@ -62,14 +62,14 @@ INDEXABLE_EXTS = (
     ".pdf", ".txt", ".md", ".csv", ".json", ".py", ".js", ".html", ".css",
     ".ts", ".tsx", ".jsx", ".java", ".c", ".h", ".cpp", ".cs", ".go", ".rs",
     ".php", ".rb", ".sql", ".yml", ".yaml", ".toml", ".xml", ".sh", ".ini",
-    ".cfg", ".log",
+    ".cfg", ".log", ".docx", ".pptx",
 )
 # --- Zip uploads (a whole codebase / folder of documents in one file) ---
 ZIP_MAX_FILES = int(os.environ.get("RAG_ZIP_MAX_FILES", "150"))
 ZIP_MAX_MEMBER_BYTES = 300_000      # bigger single files inside a zip are skipped
 ZIP_MAX_TOTAL_BYTES = 6_000_000     # total text read from one zip (zip-bomb guard)
 ZIP_MAX_CHUNKS = int(os.environ.get("RAG_ZIP_MAX_CHUNKS", "600"))
-ZIP_TEXT_EXTS = tuple(e for e in INDEXABLE_EXTS if e != ".pdf")
+ZIP_TEXT_EXTS = tuple(e for e in INDEXABLE_EXTS if e not in (".pdf", ".docx", ".pptx"))
 ZIP_SKIP_DIRS = {
     "node_modules", ".git", "__pycache__", "venv", ".venv", "env", "dist", "build",
     ".next", ".idea", ".vscode", "__macosx", "vendor", "site-packages", "target",
@@ -425,7 +425,7 @@ def _storage_headers(user: "AuthUser", content_type: Optional[str] = None) -> di
     return headers
 
 
-def storage_put(user: "AuthUser", path: str, data: bytes, content_type: str) -> bool:
+def _office_texts(user: "AuthUser", path: str, data: bytes, content_type: str) -> bool:
     import httpx
 
     r = httpx.post(
@@ -623,8 +623,53 @@ def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
     return chunks
 
 
+def _office_texts(file_bytes: bytes, kind: str) -> List[tuple]:
+    """Text of a Word (.docx) or PowerPoint (.pptx) file, read straight from its zip."""
+    import xml.etree.ElementTree as ET
+
+    def local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    out: List[tuple] = []
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        if kind == "docx":
+            raw = zf.open("word/document.xml").read(30_000_000)
+            paras = []
+            for p in ET.fromstring(raw).iter():
+                if local(p.tag) == "p":
+                    line = "".join(
+                        (t.text or "") if local(t.tag) == "t" else ("\t" if local(t.tag) == "tab" else "")
+                        for t in p.iter()
+                    )
+                    if line.strip():
+                        paras.append(line)
+            out.append((None, "\n".join(paras)))
+        else:
+            slides = sorted(
+                (n for n in zf.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
+                key=lambda n: int(re.findall(r"\d+", n)[0]),
+            )
+            for i, n in enumerate(slides, 1):
+                root = ET.fromstring(zf.open(n).read(10_000_000))
+                paras = []
+                for p in root.iter():
+                    if local(p.tag) == "p":
+                        line = "".join(t.text or "" for t in p.iter() if local(t.tag) == "t")
+                        if line.strip():
+                            paras.append(line)
+                out.append((i, "\n".join(paras)))
+    return out
+
+
 def extract_pages(file_bytes: bytes, mime: str, name: str, client) -> List[tuple]:
     """Returns [(page_number_or_None, text), ...]."""
+    low = name.lower()
+    if low.endswith((".docx", ".pptx")):
+        try:
+            return _office_texts(file_bytes, "docx" if low.endswith(".docx") else "pptx")
+        except Exception as ex:
+            print("Office file read failed:", ex)
+            raise ValueError("Could not read this Word/PowerPoint file. Is it a real .docx/.pptx (not the old .doc)?")
     is_pdf = mime == "application/pdf" or name.lower().endswith(".pdf")
     if not is_pdf:
         return [(None, file_bytes.decode("utf-8", errors="replace"))]
@@ -809,7 +854,7 @@ def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
     stored = False
     storage_path = f"{user.id}/{doc['id']}/{safe_storage_name(name)}"
     try:
-        if storage_put(user, storage_path, file_bytes, mime):
+        if _office_texts(user, storage_path, file_bytes, mime):
             try:
                 user.db.table("documents").update({"storage_path": storage_path}).eq(
                     "id", doc["id"]
@@ -1114,7 +1159,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <button id="remove-file-btn" onclick="clearFile()">✕</button>
 </div>
 <div id="input-container">
-<input type="file" id="file-input" multiple accept="image/*,.pdf,.zip,.txt,.csv,.md,.json,.py,.js,.html,.css,.ts,.tsx,.jsx,.java,.c,.h,.cpp,.cs,.go,.rs,.php,.rb,.sql,.yml,.yaml,.toml,.xml,.sh" onchange="handleFileSelect(event)">
+<input type="file" id="file-input" multiple accept="image/*,.pdf,.zip,.docx,.pptx,.txt,.csv,.md,.json,.py,.js,.html,.css,.ts,.tsx,.jsx,.java,.c,.h,.cpp,.cs,.go,.rs,.php,.rb,.sql,.yml,.yaml,.toml,.xml,.sh" onchange="handleFileSelect(event)">
 <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Attach File">📎</button>
 <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Voice Dictation">🎤</button>
 <button id="enhance-btn" class="icon-btn" onclick="enhanceCurrentPrompt()" title="Magic Wand: Enhance Prompt with AI">🪄</button>
@@ -3308,7 +3353,7 @@ def chat_endpoint(
                 saved_file_payload["doc_id"] = indexed_doc["id"]
             except Exception as ex:
                 print("Indexing failed, sending the file inline instead:", ex)
-                if is_zip_file(file_payload.get("type", ""), file_payload.get("name", "")):
+                if is_zip_file(file_payload.get("type", ""), file_payload.get("name", "")) or str(file_payload.get("name", "")).lower().endswith((".docx", ".pptx")):
                     # A zip can't be sent to Gemini as-is: tell the model what happened.
                     file_payload = None
                     saved_file_payload = None
@@ -3331,13 +3376,13 @@ def chat_endpoint(
                 ],
                 "indexed": True,
             }
-        storage_put = [
+        images_in = [
             im for im in (body.images or [])[:MAX_IMAGES_PER_MESSAGE]
             if isinstance(im, dict)
             and str(im.get("type", "")).startswith("image/")
             and "data" in im
         ]
-        if storage_put:
+        if images_in:
             # Keep the (small) pictures so they reappear when the chat is reopened.
             saved_file_payload = {
                 "multi": [
@@ -3347,7 +3392,7 @@ def chat_endpoint(
                         "size": im.get("size"),
                         "data": im["data"],
                     }
-                    for im in storage_put
+                    for im in images_in
                 ]
             }
         if RAG_ENABLED and chat_id:
@@ -3406,9 +3451,9 @@ def chat_endpoint(
                 parts.append(
                     types.Part.from_text(text="Please summarize the attached document.")
                 )
-            elif storage_put:
+            elif images_in:
                 parts.append(types.Part.from_text(text="Please describe the attached images."))
-            for im in storage_put:
+            for im in images_in:
                 im_bytes, im_mime, _ = decode_file(im)
                 parts.append(types.Part.from_bytes(data=im_bytes, mime_type=im_mime))
             if file_payload and "data" in file_payload and not indexed_doc:
@@ -3463,7 +3508,7 @@ def chat_endpoint(
                 legacy_history.append({"role": role, "parts": [text]})
 
             prompt_content = [message] if message else []
-            for im in storage_put:
+            for im in images_in:
                 im_bytes, im_mime, _ = decode_file(im)
                 prompt_content.append({"mime_type": im_mime, "data": im_bytes})
             if file_payload and "data" in file_payload and not indexed_doc:
