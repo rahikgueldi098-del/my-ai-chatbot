@@ -247,6 +247,8 @@ class ChatRequest(BaseModel):
     system_instruction: str = "You are a helpful assistant."
     # Web search makes every answer slower, so it is OFF unless requested.
     web_search: bool = False
+    # Pillar 4: Gemini writes AND runs Python (in Google's sandbox) to answer.
+    code_execution: bool = False
 
 
 # --- Rate Limiting & Analytics ---
@@ -1417,6 +1419,68 @@ def stream_with_tools(client, model_name, contents, system_instruction, tools,
 
 # ===== END OF PILLAR 6 BLOCK =====
 
+# =====================================================================
+# PILLAR 4 - CODE EXECUTION (Gemini writes and RUNS Python for the answer)
+# The code runs in GOOGLE's sandbox (no access to your server, no internet,
+# pandas / numpy / matplotlib available). Your server only displays the result.
+# =====================================================================
+CODE_EXECUTION_ENABLED = os.environ.get("CODE_EXECUTION", "1") != "0" and SDK_MODE == "NEW"
+CODE_OUTPUT_MAX_CHARS = 4000
+MAX_CHART_B64_CHARS = 700_000  # a chart bigger than this is not shown (keeps chats light)
+# Chart images are streamed as markdown data-URIs: never send them back to Gemini.
+IMG_DATA_RE = re.compile(r"!\[[^\]]*\]\(data:image/[^)]*\)")
+
+CODE_HINT = (
+    "\n\nCode mode is ON. For calculations, statistics, data analysis, simulations"
+    " and charts, write Python and RUN it instead of guessing the result. Charts:"
+    " use matplotlib (it is shown to the user automatically). Libraries: numpy,"
+    " pandas, matplotlib, scipy, sympy. The sandbox has no internet and no access"
+    " to the user's files. After the code runs, explain the result briefly in the"
+    " user's language."
+)
+
+
+def stream_code_execution(client, model_name, contents, system_instruction,
+                          usage, state, make_config):
+    """Generator: streams text + the code Gemini wrote + its output + chart images."""
+    tools = [types.Tool(code_execution=types.ToolCodeExecution())]
+    config = make_config(system_instruction, tools, state["use_thinking"])
+    for chunk in client.models.generate_content_stream(
+        model=model_name, contents=contents, config=config
+    ):
+        _capture_usage(chunk, usage)
+        cand = chunk.candidates[0] if chunk.candidates else None
+        if not cand or not cand.content or not cand.content.parts:
+            continue
+        for part in cand.content.parts:
+            if getattr(part, "thought", False):
+                continue
+            code = getattr(part, "executable_code", None)
+            result = getattr(part, "code_execution_result", None)
+            inline = getattr(part, "inline_data", None)
+            if code and getattr(code, "code", None):
+                yield "\n\n```python\n" + code.code.strip() + "\n```\n\n"
+            elif result is not None:
+                out = (getattr(result, "output", "") or "").strip()
+                failed = "OK" not in str(getattr(result, "outcome", "OUTCOME_OK"))
+                if out or failed:
+                    yield (
+                        ("\n**Error:**\n" if failed else "\n**Output:**\n")
+                        + "```text\n" + out[:CODE_OUTPUT_MAX_CHARS] + "\n```\n\n"
+                    )
+            elif inline and (getattr(inline, "mime_type", "") or "").startswith("image/"):
+                data = inline.data
+                b64 = base64.b64encode(data).decode() if isinstance(data, (bytes, bytearray)) else str(data or "")
+                if b64 and len(b64) <= MAX_CHART_B64_CHARS:
+                    yield f"\n\n![chart](data:{inline.mime_type};base64,{b64})\n\n"
+                elif b64:
+                    yield "\n\n*(The chart is too large to display.)*\n\n"
+            elif getattr(part, "text", None):
+                yield part.text
+
+
+# ===== END OF PILLAR 4 BLOCK =====
+
 HTML_CONTENT = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1602,6 +1666,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <button id="analytics-btn" class="admin-btn" style="display:none;" onclick="openAnalyticsModal()">📊 Analytics</button>
 <button id="docs-btn" class="toggle-btn" onclick="openDocsModal()" title="Documents indexed in this chat">📚 Documents</button>
 <button id="search-toggle" class="toggle-btn" onclick="toggleSearch()">Web Search: OFF</button>
+<button id="code-toggle" class="toggle-btn" onclick="toggleCode()" title="Gemini writes and runs Python to answer (calculations, data, charts)">Run Code: OFF</button>
 <select id="persona-select" onchange="handlePersonaChange(this)">
 <option value="You are a helpful, smart, and precise AI assistant.">Default Assistant</option>
 <option value="You are a Senior Full-Stack Software Engineer. Provide clean, efficient code and explain tech concepts concisely.">Senior Engineer</option>
@@ -1738,6 +1803,7 @@ let chats = [];
 let currentChatId = null;
 let currentHistory = [];
 let webSearchEnabled = false;
+let codeEnabled = false;
 let selectedFile = null;
 let selectedImages = [];  // several pictures sent together
 const MAX_IMAGES = 6;
@@ -2011,6 +2077,8 @@ return '<code>' + escapeHtml(tex) + '</code>';
 }
 function safeParseMarkdown(str) {
 str = String(str == null ? '' : str);
+// A chart image still arriving (incomplete) is hidden until it is complete.
+str = str.replace(/!\[[^\]]*\]\(data:image\/[^)]*$/, '');
 const codes = [];
 const maths = [];
 // 1) Code stays untouched (a "$" inside code is not a formula).
@@ -2755,11 +2823,21 @@ metaSpan.appendChild(pb);
 metaSpan.appendChild(metaInfo);
 msgDiv.appendChild(metaSpan);
 }
+function syncToggleButtons() {
+const s = document.getElementById('search-toggle');
+const c = document.getElementById('code-toggle');
+if (s) { s.innerText = webSearchEnabled ? "Web Search: ON" : "Web Search: OFF"; s.className = webSearchEnabled ? "toggle-btn active" : "toggle-btn"; }
+if (c) { c.innerText = codeEnabled ? "Run Code: ON" : "Run Code: OFF"; c.className = codeEnabled ? "toggle-btn active" : "toggle-btn"; }
+}
 function toggleSearch() {
 webSearchEnabled = !webSearchEnabled;
-const btn = document.getElementById('search-toggle');
-btn.innerText = webSearchEnabled ? "Web Search: ON" : "Web Search: OFF";
-btn.className = webSearchEnabled ? "toggle-btn active" : "toggle-btn";
+if (webSearchEnabled) codeEnabled = false;  // Gemini cannot use both in one request
+syncToggleButtons();
+}
+function toggleCode() {
+codeEnabled = !codeEnabled;
+if (codeEnabled) webSearchEnabled = false;
+syncToggleButtons();
 }
 function applyChip(prefix) {
 const input = document.getElementById('user-input');
@@ -3007,7 +3085,7 @@ function buildHistoryForApi() {
 if (!Array.isArray(currentHistory)) return [];
 return currentHistory
 .filter(m => m && m.content && String(m.content).trim())
-.map(m => ({ role: m.role || 'user', content: String(m.content) }));
+.map(m => ({ role: m.role || 'user', content: String(m.content).replace(/!\[[^\]]*\]\(data:image\/[^)]*\)/g, '[chart image]') }));
 }
 async function sendMessage() {
 const input = document.getElementById('user-input');
@@ -3094,6 +3172,7 @@ file: filePayload,
 attached: attachedList,
 images: imgs.length ? imgs : undefined,
 web_search: webSearchEnabled,
+code_execution: codeEnabled,
 system_instruction: systemPrompt === '__NEW__' ? 'You are a helpful assistant.' : systemPrompt
 })
 });
@@ -4069,7 +4148,7 @@ def chat_endpoint(
             client = get_gemini_client(api_key)
             contents = []
             for m in history:
-                text = TOOL_NOTE_RE.sub("", (m.get("content") or "")).strip()
+                text = IMG_DATA_RE.sub("[chart image]", TOOL_NOTE_RE.sub("", (m.get("content") or ""))).strip()
                 role = m.get("role")
                 if not text or role not in ("user", "model"):
                     continue
@@ -4108,20 +4187,30 @@ def chat_endpoint(
                 raise HTTPException(status_code=400, detail="Empty message.")
             contents.append(types.Content(role="user", parts=parts))
 
-            fn_tools = build_function_tools(web_search)
+            code_exec = bool(body.code_execution) and CODE_EXECUTION_ENABLED
+            if code_exec:
+                system_instruction += CODE_HINT
+            # Code mode has its own Gemini tool: custom tools and web search stay off.
+            fn_tools = None if code_exec else build_function_tools(web_search)
             if fn_tools:
                 system_instruction += TOOLS_HINT
                 tools = fn_tools
             else:
                 tools = (
                     [types.Tool(google_search=types.GoogleSearch())]
-                    if web_search
+                    if web_search and not code_exec
                     else None
                 )
             tool_ctx = {"user": user, "chat_id": chat_id, "start": start_time}
 
             def make_stream():
                 usage.clear()
+                if code_exec:
+                    yield from stream_code_execution(
+                        client, MODEL_NAME, contents, system_instruction,
+                        usage, state, build_config,
+                    )
+                    return
                 if fn_tools:
                     yield from stream_with_tools(
                         client, MODEL_NAME, contents, system_instruction, tools,
