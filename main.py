@@ -53,8 +53,10 @@ TOP_K = int(os.environ.get("RAG_TOP_K", "6"))                    # chunks sent t
 # Documents (all of a chat's files together) up to this size are sent WHOLE:
 # better for "summarize this" questions and no search needed.
 FULL_CONTEXT_MAX_CHARS = int(os.environ.get("RAG_FULL_CONTEXT_MAX_CHARS", "30000"))
-MAX_CHUNKS_PER_DOC = int(os.environ.get("RAG_MAX_CHUNKS", "300"))
+MAX_CHUNKS_PER_DOC = int(os.environ.get("RAG_MAX_CHUNKS", "1500"))
 MAX_UPLOAD_BYTES = int(os.environ.get("RAG_MAX_UPLOAD_BYTES", str(4_000_000)))
+# Big files go straight from the browser to Supabase Storage (they never cross Vercel).
+MAX_BIG_UPLOAD_BYTES = int(os.environ.get("RAG_MAX_BIG_UPLOAD_BYTES", str(50_000_000)))
 EMBED_BATCH = 50
 # Price per 1M embedding tokens (USD). Check your embedding model's price and set it in Vercel.
 EMBEDDING_USD_PER_M = float(os.environ.get("EMBEDDING_USD_PER_M", "0.15")) / 1_000_000
@@ -62,14 +64,14 @@ INDEXABLE_EXTS = (
     ".pdf", ".txt", ".md", ".csv", ".json", ".py", ".js", ".html", ".css",
     ".ts", ".tsx", ".jsx", ".java", ".c", ".h", ".cpp", ".cs", ".go", ".rs",
     ".php", ".rb", ".sql", ".yml", ".yaml", ".toml", ".xml", ".sh", ".ini",
-    ".cfg", ".log", ".docx", ".pptx",
+    ".cfg", ".log", ".docx", ".pptx", ".xlsx", ".odt", ".ods", ".odp", ".rtf",
 )
 # --- Zip uploads (a whole codebase / folder of documents in one file) ---
 ZIP_MAX_FILES = int(os.environ.get("RAG_ZIP_MAX_FILES", "150"))
 ZIP_MAX_MEMBER_BYTES = 300_000      # bigger single files inside a zip are skipped
 ZIP_MAX_TOTAL_BYTES = 6_000_000     # total text read from one zip (zip-bomb guard)
 ZIP_MAX_CHUNKS = int(os.environ.get("RAG_ZIP_MAX_CHUNKS", "600"))
-ZIP_TEXT_EXTS = tuple(e for e in INDEXABLE_EXTS if e not in (".pdf", ".docx", ".pptx"))
+ZIP_TEXT_EXTS = tuple(e for e in INDEXABLE_EXTS if e not in (".pdf", ".docx", ".pptx", ".xlsx", ".odt", ".ods", ".odp", ".rtf"))
 ZIP_SKIP_DIRS = {
     "node_modules", ".git", "__pycache__", "venv", ".venv", "env", "dist", "build",
     ".next", ".idea", ".vscode", "__macosx", "vendor", "site-packages", "target",
@@ -216,6 +218,12 @@ class EnhanceRequest(BaseModel):
 
 class CreateChatRequest(BaseModel):
     title: Optional[str] = "New Discussion"
+
+
+class StoredDocumentRequest(BaseModel):
+    path: str
+    name: str
+    type: str = "application/octet-stream"
 
 
 class DocumentUploadRequest(BaseModel):
@@ -425,7 +433,7 @@ def _storage_headers(user: "AuthUser", content_type: Optional[str] = None) -> di
     return headers
 
 
-def _office_texts(user: "AuthUser", path: str, data: bytes, content_type: str) -> bool:
+def storage_put(user: "AuthUser", path: str, data: bytes, content_type: str) -> bool:
     import httpx
 
     r = httpx.post(
@@ -587,12 +595,8 @@ def is_indexable(file_payload: dict) -> bool:
     name = (file_payload.get("name") or "").lower()
     if mime.startswith("image/"):
         return False
-    return (
-        is_zip_file(mime, name)
-        or mime in ("application/pdf", "application/json")
-        or mime.startswith("text/")
-        or name.endswith(INDEXABLE_EXTS)
-    )
+    # Any other file is tried; extract_pages() gives a clear message if it is not readable.
+    return True
 
 
 def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
@@ -623,7 +627,7 @@ def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
     return chunks
 
 
-def _office_texts(file_bytes: bytes, kind: str) -> List[tuple]:
+def uploadBigFile(file_bytes: bytes, kind: str) -> List[tuple]:
     """Text of a Word (.docx) or PowerPoint (.pptx) file, read straight from its zip."""
     import xml.etree.ElementTree as ET
 
@@ -661,12 +665,110 @@ def _office_texts(file_bytes: bytes, kind: str) -> List[tuple]:
     return out
 
 
+def _xlsx_text(file_bytes: bytes) -> str:
+    import xml.etree.ElementTree as ET
+
+    def local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    def col_index(ref: str) -> int:
+        letters = re.match(r"[A-Z]+", ref or "")
+        n = 0
+        for ch in (letters.group(0) if letters else "A"):
+            n = n * 26 + (ord(ch) - 64)
+        return n - 1
+
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        names = zf.namelist()
+        shared: List[str] = []
+        if "xl/sharedStrings.xml" in names:
+            root = ET.fromstring(zf.open("xl/sharedStrings.xml").read(30_000_000))
+            for si in root:
+                shared.append("".join(t.text or "" for t in si.iter() if local(t.tag) == "t"))
+        sheet_names: List[str] = []
+        if "xl/workbook.xml" in names:
+            wb = ET.fromstring(zf.open("xl/workbook.xml").read(5_000_000))
+            sheet_names = [e.get("name", "") for e in wb.iter() if local(e.tag) == "sheet"]
+        sheets = sorted(
+            (n for n in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)),
+            key=lambda n: int(re.findall(r"\d+", n)[0]),
+        )
+        parts = []
+        for si_, n in enumerate(sheets):
+            title = sheet_names[si_] if si_ < len(sheet_names) else f"Sheet {si_ + 1}"
+            lines = [f"=== Sheet: {title} ==="]
+            rows = 0
+            for ev, row in ET.iterparse(zf.open(n), events=("end",)):
+                if local(row.tag) != "row":
+                    continue
+                cells: Dict[int, str] = {}
+                for c in row:
+                    if local(c.tag) != "c":
+                        continue
+                    v = next((x for x in c if local(x.tag) == "v"), None)
+                    val = ""
+                    if c.get("t") == "s" and v is not None and (v.text or "").isdigit():
+                        i = int(v.text)
+                        val = shared[i] if i < len(shared) else ""
+                    elif c.get("t") == "inlineStr":
+                        val = "".join(t.text or "" for t in c.iter() if local(t.tag) == "t")
+                    elif v is not None:
+                        val = v.text or ""
+                    if val != "":
+                        cells[col_index(c.get("r", ""))] = val
+                if cells:
+                    lines.append("\t".join(cells.get(i, "") for i in range(max(cells) + 1)))
+                row.clear()
+                rows += 1
+                if rows >= 20000:
+                    break
+            parts.append("\n".join(lines))
+        return "\n\n".join(parts)
+
+
+def _odf_text(file_bytes: bytes) -> str:
+    import xml.etree.ElementTree as ET
+
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        root = ET.fromstring(zf.open("content.xml").read(30_000_000))
+    lines = []
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] in ("p", "h"):
+            line = "".join(el.itertext())
+            if line.strip():
+                lines.append(line)
+    return "\n".join(lines)
+
+
+def _rtf_text(raw: bytes) -> str:
+    text = raw.decode("latin-1", errors="replace")
+    text = re.sub(r"\\'([0-9a-fA-F]{2})", lambda m: bytes.fromhex(m.group(1)).decode("cp1252", "replace"), text)
+    text = re.sub(r"\\(par|line)\b", "\n", text)
+    text = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", text)
+    return re.sub(r"[{}]", "", text)
+
+
 def extract_pages(file_bytes: bytes, mime: str, name: str, client) -> List[tuple]:
     """Returns [(page_number_or_None, text), ...]."""
     low = name.lower()
+    try:
+        if low.endswith(".xlsx"):
+            return [(None, _xlsx_text(file_bytes))]
+        if low.endswith((".odt", ".ods", ".odp")):
+            return [(None, _odf_text(file_bytes))]
+    except Exception as ex:
+        print("Office file read failed:", ex)
+        raise ValueError("Could not read this file. Is it damaged or password-protected?")
+    if low.endswith(".rtf"):
+        return [(None, _rtf_text(file_bytes))]
+    if low.endswith((".doc", ".xls", ".ppt")):
+        raise ValueError("Old Office format. Open it and use Save As .docx / .xlsx / .pptx, then attach that.")
+    is_pdf_or_office = (mime == "application/pdf") or low.endswith((".pdf", ".docx", ".pptx"))
+    if not is_pdf_or_office and b"\x00" in file_bytes[:4096]:
+        raise ValueError("This kind of file (audio, video, program or other binary) can't be read as text.")
     if low.endswith((".docx", ".pptx")):
         try:
-            return _office_texts(file_bytes, "docx" if low.endswith(".docx") else "pptx")
+            return uploadBigFile(file_bytes, "docx" if low.endswith(".docx") else "pptx")
         except Exception as ex:
             print("Office file read failed:", ex)
             raise ValueError("Could not read this Word/PowerPoint file. Is it a real .docx/.pptx (not the old .doc)?")
@@ -750,11 +852,18 @@ def embed_and_log(client, user, client_ip: str, texts: List[str], task_type: str
 
 
 def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
-                    client_ip: str = "") -> dict:
-    """Extract -> chunk -> embed -> store. Raises ValueError for user-facing problems."""
-    file_bytes, mime, name = decode_file(file_payload)
-    if len(file_bytes) > MAX_UPLOAD_BYTES:
-        raise ValueError("File is too large to index.")
+                    client_ip: str = "", raw: Optional[tuple] = None) -> dict:
+    """Extract -> chunk -> embed -> store. Raises ValueError for user-facing problems.
+    `raw` = (bytes, mime, name, storage_path) when the file was already uploaded to Storage."""
+    if raw:
+        file_bytes, mime, name, existing_path = raw
+        if len(file_bytes) > MAX_BIG_UPLOAD_BYTES:
+            raise ValueError("File is too large to index.")
+    else:
+        file_bytes, mime, name = decode_file(file_payload)
+        existing_path = None
+        if len(file_bytes) > MAX_UPLOAD_BYTES:
+            raise ValueError("File is too large to index.")
 
     # Same file attached twice in the same chat -> reuse the existing index.
     existing = (
@@ -852,9 +961,9 @@ def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
     # Keep the original file so the user can open it later by clicking it.
     # First choice: Supabase Storage. Fallback: the old document_files table.
     stored = False
-    storage_path = f"{user.id}/{doc['id']}/{safe_storage_name(name)}"
+    storage_path = existing_path or f"{user.id}/{doc['id']}/{safe_storage_name(name)}"
     try:
-        if _office_texts(user, storage_path, file_bytes, mime):
+        if existing_path or storage_put(user, storage_path, file_bytes, mime):
             try:
                 user.db.table("documents").update({"storage_path": storage_path}).eq(
                     "id", doc["id"]
@@ -862,10 +971,11 @@ def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
                 stored = True
             except Exception as ex:
                 print("storage_path column missing? Using the old table:", ex)
-                storage_delete(user, [storage_path])
+                if not existing_path:
+                    storage_delete(user, [storage_path])
     except Exception as ex:
         print("Storage unavailable, using the old table:", ex)
-    if not stored:
+    if not stored and not existing_path:
         try:
             user.db.table("document_files").insert({
                 "document_id": doc["id"],
@@ -1159,7 +1269,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <button id="remove-file-btn" onclick="clearFile()">✕</button>
 </div>
 <div id="input-container">
-<input type="file" id="file-input" multiple accept="image/*,.pdf,.zip,.docx,.pptx,.txt,.csv,.md,.json,.py,.js,.html,.css,.ts,.tsx,.jsx,.java,.c,.h,.cpp,.cs,.go,.rs,.php,.rb,.sql,.yml,.yaml,.toml,.xml,.sh" onchange="handleFileSelect(event)">
+<input type="file" id="file-input" multiple onchange="handleFileSelect(event)">
 <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Attach File">📎</button>
 <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Voice Dictation">🎤</button>
 <button id="enhance-btn" class="icon-btn" onclick="enhanceCurrentPrompt()" title="Magic Wand: Enhance Prompt with AI">🪄</button>
@@ -1274,7 +1384,8 @@ let selectedFile = null;
 let selectedImages = [];  // several pictures sent together
 const MAX_IMAGES = 6;
 let selectedFiles = [];   // used when several documents are picked at once
-const MAX_FILE_BYTES = 3200000;
+const MAX_FILE_BYTES = 2500000;   // bigger files go straight to Supabase Storage
+const MAX_BIG_BYTES = 50000000;
 const MAX_FILES_AT_ONCE = 20;
 let recognition = null;
 let isRecording = false;
@@ -1391,6 +1502,53 @@ function startOAuth(provider) {
   if (!oauthCfg || !oauthCfg.authorize_url) return;
   const redirect = encodeURIComponent(window.location.origin + '/');
   window.location.href = oauthCfg.authorize_url + '?provider=' + encodeURIComponent(provider) + '&redirect_to=' + redirect;
+}
+async function getStorageCfg() {
+  if (!oauthCfg) {
+    try { oauthCfg = await (await _origFetch('/api/auth/config')).json(); } catch (e) { return null; }
+  }
+  return oauthCfg;
+}
+function jwtSub(token) {
+  try {
+    const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(part)).sub || '';
+  } catch (e) { return ''; }
+}
+// Big file: browser -> Supabase Storage directly, then the server indexes it from there.
+async function uploadBigFile(f, chatId, signal, setHint) {
+  const fail = (msg) => new Response(JSON.stringify({ detail: msg }), { status: 500 });
+  const cfg = await getStorageCfg();
+  if (!cfg || !cfg.anon_key) return fail('Storage upload is not available.');
+  const safe = f.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100) || 'file';
+  const send = async () => {
+    const token = localStorage.getItem('supabase_token') || '';
+    const uid = jwtSub(token);
+    const path = `${uid}/uploads/${Date.now()}-${safe}`;
+    const r = await _origFetch(`${cfg.supabase_url}/storage/v1/object/${cfg.bucket}/${path}`, {
+      method: 'POST',
+      headers: { apikey: cfg.anon_key, Authorization: 'Bearer ' + token, 'Content-Type': f.type || 'application/octet-stream', 'x-upsert': 'false' },
+      body: f.file,
+      signal: signal
+    });
+    return { r, path };
+  };
+  setHint('Uploading ' + f.name + ' (' + (f.size / 1048576).toFixed(1) + ' MB)…');
+  let { r, path } = await send();
+  if (r.status === 401 || r.status === 403 || r.status === 400) {
+    if (await tryRefresh()) ({ r, path } = await send());
+  }
+  if (!r.ok) {
+    let m = ''; try { m = (await r.json()).message || ''; } catch (e) {}
+    return fail('Upload failed (' + r.status + ') ' + m);
+  }
+  setHint('Reading and indexing ' + f.name + '…');
+  return await fetch(`/api/chats/${chatId}/documents/from-storage`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    signal: signal,
+    body: JSON.stringify({ path: path, name: f.name, type: f.type || 'application/octet-stream' })
+  });
 }
 function jwtEmail(token) {
   try {
@@ -2291,10 +2449,18 @@ if (files.some(isImg) && files.some(f => !isImg(f))) {
 alert('Images and documents cannot be sent together. Only the documents were kept.');
 files = files.filter(f => !isImg(f));
 }
-const tooBig = files.filter(f => !isImg(f) && f.size > MAX_FILE_BYTES);
+const tooBig = files.filter(f => !isImg(f) && f.size > MAX_BIG_BYTES);
 if (tooBig.length) {
-alert('Too large (max ' + (MAX_FILE_BYTES / 1000000).toFixed(1) + ' MB each), skipped:\n' + tooBig.map(f => f.name).join('\n'));
+alert('Too large (max ' + Math.round(MAX_BIG_BYTES / 1000000) + ' MB each), skipped:\n' + tooBig.map(f => f.name).join('\n'));
+files = files.filter(f => isImg(f) || f.size <= MAX_BIG_BYTES);
+}
+const needStorage = files.filter(f => !isImg(f) && f.size > MAX_FILE_BYTES);
+if (needStorage.length) {
+const cfg = await getStorageCfg();
+if (!cfg || !cfg.anon_key) {
+alert('Files over 2.5 MB need Supabase Storage (SUPABASE_KEY must be the anon key). Skipped:\n' + needStorage.map(f => f.name).join('\n'));
 files = files.filter(f => isImg(f) || f.size <= MAX_FILE_BYTES);
+}
 }
 const limit = files.some(isImg) ? MAX_IMAGES : MAX_FILES_AT_ONCE;
 if (files.length > limit) {
@@ -2312,8 +2478,12 @@ if (total() > 3500000) payloads = await buildImagePayloads(files, 1000, 0.6);
 if (total() > 3800000) { alert('These pictures are too big even after shrinking. Send fewer at once.'); clearFile(); return; }
 } else {
 for (const f of files) {
-const guessed = f.type || (/\.zip$/i.test(f.name) ? 'application/zip' : 'text/plain');
+const guessed = f.type || (/\.zip$/i.test(f.name) ? 'application/zip' : 'application/octet-stream');
+if (f.size > MAX_FILE_BYTES) {
+payloads.push({ name: f.name, type: guessed, size: f.size, big: true, file: f });
+} else {
 payloads.push({ name: f.name, type: guessed, size: f.size, data: await readFileAsDataURL(f) });
+}
 }
 }
 } catch (err) {
@@ -2335,7 +2505,7 @@ previewImg.src = payloads[0].data;
 previewImg.style.display = 'block';
 previewIcon.innerText = '';
 fileName.innerText = `${payloads.length} images`;
-} else if (payloads.length === 1) {
+} else if (payloads.length === 1 && !payloads[0].big) {
 const p = payloads[0];
 selectedFile = p;
 if (p.type.startsWith('image/')) {
@@ -2352,7 +2522,7 @@ selectedFiles = payloads;
 previewImg.style.display = 'none';
 previewIcon.innerText = '📄';
 const total = payloads.reduce((n, p) => n + p.size, 0);
-fileName.innerText = `${payloads.length} files (${(total / 1024).toFixed(1)} KB)`;
+fileName.innerText = payloads.length === 1 ? `${payloads[0].name} (${(total / 1048576).toFixed(1)} MB)` : `${payloads.length} files (${(total / 1048576).toFixed(1)} MB)`;
 }
 preview.style.display = 'flex';
 }
@@ -2485,7 +2655,9 @@ const failed = [];
 for (let i = 0; i < multi.length; i++) {
 contentDiv.innerHTML = `<div class="indexing-hint">📚 Indexing file ${i + 1} of ${multi.length}: ${escapeHtml(multi[i].name)}…</div>`;
 try {
-const up = await fetch(`/api/chats/${currentChatId}/documents`, {
+const up = multi[i].big
+? await uploadBigFile(multi[i], currentChatId, activeAbortController.signal, (t) => { contentDiv.innerHTML = `<div class="indexing-hint">📚 File ${i + 1} of ${multi.length}: ${escapeHtml(t)}</div>`; })
+: await fetch(`/api/chats/${currentChatId}/documents`, {
 method: 'POST',
 headers: getAuthHeaders(),
 signal: activeAbortController.signal,
@@ -2787,12 +2959,33 @@ OAUTH_PROVIDERS = [
 ]
 
 
+def _public_anon_key() -> str:
+    """The key is only handed to the browser if it really is the PUBLIC anon key.
+    A service_role / secret key must never be exposed."""
+    k = SUPABASE_KEY or ""
+    if k.startswith("sb_publishable_"):
+        return k
+    if not k or k.startswith("sb_secret_"):
+        return ""
+    try:
+        part = k.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        role = json.loads(base64.urlsafe_b64decode(part)).get("role")
+        return k if role == "anon" else ""
+    except Exception:
+        return ""
+
+
 @app.get("/api/auth/config")
 def auth_config():
-    """Public info the login screen needs for the 'Continue with Google/GitHub' buttons."""
+    """Public info the page needs: login buttons and direct uploads of big files."""
     return JSONResponse({
         "authorize_url": f"{SUPABASE_URL}/auth/v1/authorize" if SUPABASE_URL else "",
         "providers": OAUTH_PROVIDERS if SUPABASE_URL else [],
+        "supabase_url": SUPABASE_URL,
+        "anon_key": _public_anon_key(),
+        "bucket": STORAGE_BUCKET,
+        "max_big_bytes": MAX_BIG_UPLOAD_BYTES,
     })
 
 
@@ -2997,6 +3190,49 @@ def upload_document(
         return JSONResponse({"detail": str(ex)}, status_code=400)
     except Exception as ex:
         print("Upload indexing failed:", ex)
+        return JSONResponse({"detail": "Could not index this file."}, status_code=500)
+
+
+@app.post("/api/chats/{chat_id}/documents/from-storage")
+def index_stored_document(
+    chat_id: str,
+    body: StoredDocumentRequest,
+    request: Request,
+    user: AuthUser = Depends(require_user),
+):
+    """Index a (possibly big) file the browser already uploaded to Supabase Storage."""
+    client_ip = get_client_ip(request)
+    path = body.path
+    if not path.startswith(f"{user.id}/") or ".." in path:
+        return JSONResponse({"detail": "Invalid file path."}, status_code=400)
+    if not RAG_ENABLED:
+        storage_delete(user, [path])
+        return JSONResponse({"detail": "Document search is turned off."}, status_code=400)
+    if not check_rate_limit(f"upload:{user.id}", 40):
+        return JSONResponse({"detail": "Too many uploads. Wait a minute."}, status_code=429)
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return JSONResponse({"detail": "GEMINI_API_KEY is not configured."}, status_code=500)
+    try:
+        if not _owns_chat(user, chat_id):
+            storage_delete(user, [path])
+            return JSONResponse({"detail": "Chat not found."}, status_code=404)
+        data = storage_get(user, path)
+        if data is None:
+            return JSONResponse({"detail": "The uploaded file was not found."}, status_code=404)
+        result = ingest_document(
+            user, chat_id, {}, get_gemini_client(api_key), client_ip,
+            raw=(data, body.type or "application/octet-stream", body.name or "file", path),
+        )
+        if result.get("reused"):
+            storage_delete(user, [path])   # same file was already indexed in this chat
+        return JSONResponse(result)
+    except ValueError as ex:
+        storage_delete(user, [path])
+        return JSONResponse({"detail": str(ex)}, status_code=400)
+    except Exception as ex:
+        print("Stored-file indexing failed:", ex)
+        storage_delete(user, [path])
         return JSONResponse({"detail": "Could not index this file."}, status_code=500)
 
 
@@ -3353,7 +3589,7 @@ def chat_endpoint(
                 saved_file_payload["doc_id"] = indexed_doc["id"]
             except Exception as ex:
                 print("Indexing failed, sending the file inline instead:", ex)
-                if is_zip_file(file_payload.get("type", ""), file_payload.get("name", "")) or str(file_payload.get("name", "")).lower().endswith((".docx", ".pptx")):
+                if isinstance(ex, ValueError) or is_zip_file(file_payload.get("type", ""), file_payload.get("name", "")) or str(file_payload.get("name", "")).lower().endswith((".docx", ".pptx", ".xlsx")):
                     # A zip can't be sent to Gemini as-is: tell the model what happened.
                     file_payload = None
                     saved_file_payload = None
