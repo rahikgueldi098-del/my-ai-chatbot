@@ -634,7 +634,7 @@ def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
     return chunks
 
 
-def uploadBigFile(file_bytes: bytes, kind: str) -> List[tuple]:
+def _office_texts(file_bytes: bytes, kind: str) -> List[tuple]:
     """Text of a Word (.docx) or PowerPoint (.pptx) file, read straight from its zip."""
     import xml.etree.ElementTree as ET
 
@@ -775,7 +775,7 @@ def extract_pages(file_bytes: bytes, mime: str, name: str, client) -> List[tuple
         raise ValueError("This kind of file (audio, video, program or other binary) can't be read as text.")
     if low.endswith((".docx", ".pptx")):
         try:
-            return uploadBigFile(file_bytes, "docx" if low.endswith(".docx") else "pptx")
+            return _office_texts(file_bytes, "docx" if low.endswith(".docx") else "pptx")
         except Exception as ex:
             print("Office file read failed:", ex)
             raise ValueError("Could not read this Word/PowerPoint file. Is it a real .docx/.pptx (not the old .doc)?")
@@ -1784,6 +1784,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <button class="close-btn" onclick="closeDocsModal()">✕</button>
 </div>
 <div style="font-size: 0.8rem; color: #888;">PDFs and text files you attach are indexed, so the AI can search them in every message of this chat. Delete a file here to stop the AI from using it.</div>
+<div id="docs-status" style="font-size:0.78rem; color:#888;"></div>
 <div id="docs-list" style="display:flex; flex-direction:column; gap:8px;"></div>
 </div>
 </div>
@@ -3366,10 +3367,24 @@ btn.disabled = false;
 alert('Could not delete the document. Please try again.');
 }
 }
+async function loadRagStatus() {
+const el = document.getElementById('docs-status');
+if (!el) return;
+el.textContent = 'Checking search setup…';
+try {
+const r = await fetch('/api/rag/status', { headers: getAuthHeaders() });
+const d = await r.json();
+const parts = [];
+parts.push(d.hybrid ? '✅ Search: keywords + meaning' : (d.vector ? '⚠️ Search: meaning only (run hybrid_search SQL in Supabase to add keywords)' : '❌ Search is not set up in Supabase'));
+parts.push(d.storage_column ? '✅ Original files: Supabase Storage' : '⚠️ Original files: old table (run the Storage SQL)');
+el.innerHTML = parts.map(p => escapeHtml(p)).join('<br>');
+} catch (e) { el.textContent = ''; }
+}
 function openDocsModal() {
 document.getElementById('docs-modal').classList.add('open');
 renderDocsList();
 refreshDocs();
+loadRagStatus();
 }
 function closeDocsModal() {
 document.getElementById('docs-modal').classList.remove('open');
@@ -4130,6 +4145,36 @@ def index_stored_document(
         print("Stored-file indexing failed:", ex)
         storage_delete(user, [path])
         return JSONResponse({"detail": "Could not index this file."}, status_code=500)
+
+
+@app.get("/api/rag/status")
+def rag_status(user: AuthUser = Depends(require_user)):
+    """Tells the page which Supabase setup steps are done (shown in the Documents window)."""
+    out: Dict[str, Any] = {"hybrid": False, "storage_column": False, "vector": False}
+    try:
+        user.db.rpc(
+            "match_document_chunks",
+            {"query_embedding": [0.0] * EMBEDDING_DIM, "p_chat_id": "__none__", "match_count": 1},
+        ).execute()
+        out["vector"] = True
+    except Exception as ex:
+        out["vector_error"] = str(ex)[:160]
+    try:
+        user.db.rpc(
+            "hybrid_match_document_chunks",
+            {"query_embedding": [0.0] * EMBEDDING_DIM, "query_text": "test",
+             "p_chat_id": "__none__", "match_count": 1},
+        ).execute()
+        out["hybrid"] = True
+    except Exception as ex:
+        out["hybrid_error"] = str(ex)[:160]
+    try:
+        user.db.table("documents").select("storage_path").limit(1).execute()
+        out["storage_column"] = True
+    except Exception as ex:
+        out["storage_error"] = str(ex)[:160]
+    out["hybrid_enabled"] = HYBRID_SEARCH
+    return JSONResponse(out)
 
 
 @app.delete("/api/documents/{doc_id}")
