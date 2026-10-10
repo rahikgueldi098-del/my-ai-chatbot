@@ -46,6 +46,7 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-001")
 EMBEDDING_DIM = 768  # must match vector(768) in rag_setup.sql
 CHUNK_SIZE = int(os.environ.get("RAG_CHUNK_SIZE", "1000"))      # characters
 CHUNK_OVERLAP = int(os.environ.get("RAG_CHUNK_OVERLAP", "150"))  # characters
+MAX_IMAGES_PER_MESSAGE = 6
 HYBRID_SEARCH = os.environ.get("RAG_HYBRID", "1") != "0"
 TOP_K = int(os.environ.get("RAG_TOP_K", "6"))                    # chunks sent to Gemini
 # Documents (all of a chat's files together) up to this size are sent WHOLE:
@@ -227,6 +228,8 @@ class ChatRequest(BaseModel):
     file: Optional[Dict[str, Any]] = None
     # Several documents uploaded one by one beforehand: only their names/ids.
     attached: Optional[List[Dict[str, Any]]] = None
+    # Several images sent together (already shrunk by the page).
+    images: Optional[List[Dict[str, Any]]] = None
     system_instruction: str = "You are a helpful assistant."
     # Web search makes every answer slower, so it is OFF unless requested.
     web_search: bool = False
@@ -1145,6 +1148,8 @@ let currentChatId = null;
 let currentHistory = [];
 let webSearchEnabled = false;
 let selectedFile = null;
+let selectedImages = [];  // several pictures sent together
+const MAX_IMAGES = 6;
 let selectedFiles = [];   // used when several documents are picked at once
 const MAX_FILE_BYTES = 3200000;
 const MAX_FILES_AT_ONCE = 20;
@@ -1510,6 +1515,16 @@ const msgDiv = document.createElement('div');
 msgDiv.className = `message ${role}`;
 if (fileObj && Array.isArray(fileObj.multi)) {
 fileObj.multi.forEach(f => {
+if (f.type && f.type.startsWith('image/') && f.data) {
+const im = document.createElement('img');
+im.src = f.data;
+im.style.cursor = 'pointer';
+im.style.maxWidth = '48%';
+im.style.marginRight = '4px';
+im.onclick = () => openAttachment(f);
+msgDiv.appendChild(im);
+return;
+}
 const badge = document.createElement('div');
 badge.className = 'doc-badge';
 badge.innerHTML = `📄 <strong>${escapeHtml(f.name || 'file')}</strong>`;
@@ -2060,42 +2075,96 @@ r.onerror = () => reject(r.error);
 r.readAsDataURL(file);
 });
 }
+function shrinkImage(file, maxDim, quality) {
+return new Promise((resolve) => {
+const keepOriginal = () => readFileAsDataURL(file).then(resolve).catch(() => resolve(null));
+if (!/^image\/(jpeg|png|webp)$/i.test(file.type || '')) return keepOriginal();
+const url = URL.createObjectURL(file);
+const img = new Image();
+img.onload = () => {
+try {
+const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+const w = Math.max(1, Math.round(img.width * scale));
+const h = Math.max(1, Math.round(img.height * scale));
+const canvas = document.createElement('canvas');
+canvas.width = w; canvas.height = h;
+const ctx = canvas.getContext('2d');
+ctx.fillStyle = '#fff';
+ctx.fillRect(0, 0, w, h);
+ctx.drawImage(img, 0, 0, w, h);
+const out = canvas.toDataURL('image/jpeg', quality);
+URL.revokeObjectURL(url);
+if (file.size < 300000 && scale === 1) return keepOriginal();
+resolve(out);
+} catch (err) { URL.revokeObjectURL(url); keepOriginal(); }
+};
+img.onerror = () => { URL.revokeObjectURL(url); keepOriginal(); };
+img.src = url;
+});
+}
+async function buildImagePayloads(files, maxDim, quality) {
+const out = [];
+for (const f of files) {
+const data = await shrinkImage(f, maxDim, quality);
+if (!data) continue;
+const type = data.startsWith('data:image/jpeg') ? 'image/jpeg' : (f.type || 'image/png');
+out.push({ name: f.name, type: type, size: Math.round(data.length * 0.75), data: data });
+}
+return out;
+}
 async function handleFileSelect(e) {
 let files = Array.from(e.target.files || []);
 if (!files.length) return;
-const tooBig = files.filter(f => f.size > MAX_FILE_BYTES);
-if (tooBig.length) {
-alert('Too large (max ' + (MAX_FILE_BYTES / 1000000).toFixed(1) + ' MB each), skipped:\n' + tooBig.map(f => f.name).join('\n'));
-files = files.filter(f => f.size <= MAX_FILE_BYTES);
-}
-if (files.length > MAX_FILES_AT_ONCE) {
-alert('Maximum ' + MAX_FILES_AT_ONCE + ' files at once. Only the first ' + MAX_FILES_AT_ONCE + ' were kept.');
-files = files.slice(0, MAX_FILES_AT_ONCE);
-}
 const isImg = f => (f.type || '').startsWith('image/');
-if (files.length > 1 && files.some(isImg)) {
-alert('Images are sent one at a time, so they were left out. Only the documents were kept.');
+if (files.some(isImg) && files.some(f => !isImg(f))) {
+alert('Images and documents cannot be sent together. Only the documents were kept.');
 files = files.filter(f => !isImg(f));
 }
+const tooBig = files.filter(f => !isImg(f) && f.size > MAX_FILE_BYTES);
+if (tooBig.length) {
+alert('Too large (max ' + (MAX_FILE_BYTES / 1000000).toFixed(1) + ' MB each), skipped:\n' + tooBig.map(f => f.name).join('\n'));
+files = files.filter(f => isImg(f) || f.size <= MAX_FILE_BYTES);
+}
+const limit = files.some(isImg) ? MAX_IMAGES : MAX_FILES_AT_ONCE;
+if (files.length > limit) {
+alert('Maximum ' + limit + ' at once. Only the first ' + limit + ' were kept.');
+files = files.slice(0, limit);
+}
 if (!files.length) { clearFile(); return; }
+const allImages = files.every(isImg);
 let payloads = [];
 try {
+if (allImages) {
+payloads = await buildImagePayloads(files, 1600, 0.85);
+const total = () => payloads.reduce((n, p) => n + p.data.length, 0);
+if (total() > 3500000) payloads = await buildImagePayloads(files, 1000, 0.6);
+if (total() > 3800000) { alert('These pictures are too big even after shrinking. Send fewer at once.'); clearFile(); return; }
+} else {
 for (const f of files) {
 const guessed = f.type || (/\.zip$/i.test(f.name) ? 'application/zip' : 'text/plain');
 payloads.push({ name: f.name, type: guessed, size: f.size, data: await readFileAsDataURL(f) });
+}
 }
 } catch (err) {
 alert('Could not read the file.');
 clearFile();
 return;
 }
+if (!payloads.length) { clearFile(); return; }
 selectedFile = null;
 selectedFiles = [];
+selectedImages = [];
 const preview = document.getElementById('file-preview');
 const previewImg = document.getElementById('preview-img');
 const previewIcon = document.getElementById('preview-icon');
 const fileName = document.getElementById('file-name');
-if (payloads.length === 1) {
+if (allImages && payloads.length > 1) {
+selectedImages = payloads;
+previewImg.src = payloads[0].data;
+previewImg.style.display = 'block';
+previewIcon.innerText = '';
+fileName.innerText = `${payloads.length} images`;
+} else if (payloads.length === 1) {
 const p = payloads[0];
 selectedFile = p;
 if (p.type.startsWith('image/')) {
@@ -2119,6 +2188,7 @@ preview.style.display = 'flex';
 function clearFile() {
 selectedFile = null;
 selectedFiles = [];
+selectedImages = [];
 document.getElementById('file-input').value = '';
 document.getElementById('file-preview').style.display = 'none';
 }
@@ -2208,13 +2278,17 @@ async function sendMessage() {
 const input = document.getElementById('user-input');
 let text = input ? input.value.trim() : '';
 const multi = selectedFiles.slice();
-if (!text && !selectedFile && !multi.length) return;
+const imgs = selectedImages.slice();
+if (!text && !selectedFile && !multi.length && !imgs.length) return;
 if (!text && multi.length) text = 'Please summarize the attached files.';
+if (!text && imgs.length) text = 'Please describe the attached images.';
 if (!currentChatId) {
 await startNewChat();
 }
 const filePayload = selectedFile;
-const shownFile = multi.length ? { multi: multi.map(f => ({ name: f.name, type: f.type, size: f.size })) } : filePayload;
+const shownFile = multi.length
+? { multi: multi.map(f => ({ name: f.name, type: f.type, size: f.size })) }
+: (imgs.length ? { multi: imgs.map(f => ({ name: f.name, type: f.type, size: f.size, data: f.data })) } : filePayload);
 currentHistory.push({ role: 'user', content: text, file_payload: shownFile });
 const userDiv = appendMessageUI('user', text, shownFile);
 if (input) {
@@ -2280,6 +2354,7 @@ history: buildHistoryForApi(),
 message: text,
 file: filePayload,
 attached: attachedList,
+images: imgs.length ? imgs : undefined,
 web_search: webSearchEnabled,
 system_instruction: systemPrompt === '__NEW__' ? 'You are a helpful assistant.' : systemPrompt
 })
@@ -2699,7 +2774,7 @@ def list_documents(chat_id: str, user: AuthUser = Depends(require_user)):
 
 
 @app.post("/api/chats/{chat_id}/documents")
-def upload_document(
+def images_in(
     chat_id: str,
     body: DocumentUploadRequest,
     request: Request,
@@ -3087,6 +3162,25 @@ def chat_endpoint(
                 ],
                 "indexed": True,
             }
+        images_in = [
+            im for im in (body.images or [])[:MAX_IMAGES_PER_MESSAGE]
+            if isinstance(im, dict)
+            and str(im.get("type", "")).startswith("image/")
+            and "data" in im
+        ]
+        if images_in:
+            # Keep the (small) pictures so they reappear when the chat is reopened.
+            saved_file_payload = {
+                "multi": [
+                    {
+                        "name": str(im.get("name", "image"))[:200],
+                        "type": str(im.get("type", "")),
+                        "size": im.get("size"),
+                        "data": im["data"],
+                    }
+                    for im in images_in
+                ]
+            }
         if RAG_ENABLED and chat_id:
             try:
                 doc_ctx = build_doc_context(
@@ -3143,6 +3237,11 @@ def chat_endpoint(
                 parts.append(
                     types.Part.from_text(text="Please summarize the attached document.")
                 )
+            elif images_in:
+                parts.append(types.Part.from_text(text="Please describe the attached images."))
+            for im in images_in:
+                im_bytes, im_mime, _ = decode_file(im)
+                parts.append(types.Part.from_bytes(data=im_bytes, mime_type=im_mime))
             if file_payload and "data" in file_payload and not indexed_doc:
                 file_bytes, mime, name = decode_file(file_payload)
                 if mime.startswith("image/") or mime == "application/pdf":
@@ -3195,6 +3294,9 @@ def chat_endpoint(
                 legacy_history.append({"role": role, "parts": [text]})
 
             prompt_content = [message] if message else []
+            for im in images_in:
+                im_bytes, im_mime, _ = decode_file(im)
+                prompt_content.append({"mime_type": im_mime, "data": im_bytes})
             if file_payload and "data" in file_payload and not indexed_doc:
                 file_bytes, mime, name = decode_file(file_payload)
                 if mime.startswith("image/") or mime == "application/pdf":
