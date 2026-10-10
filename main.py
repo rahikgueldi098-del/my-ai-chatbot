@@ -183,7 +183,12 @@ def require_user(authorization: Optional[str] = Header(None)) -> AuthUser:
 
 
 # Added to every chat so the answer can be shown in the live preview panel.
-CANVAS_HINT = (
+MATH_HINT = (
+    " For math formulas use LaTeX: $...$ inline and $$...$$ on its own line for"
+    " important results, always closing the delimiters. Never leave bare LaTeX"
+    " commands outside those delimiters. Write money as plain text (5 USD)."
+)
+CANVAS_HINT = MATH_HINT + (
     " When the user asks for a web page, app, UI, game, chart, diagram or"
     " visualization, reply with ONE complete, self-contained code block so it can"
     " be previewed live: ```html with all CSS and JavaScript inline in a single"
@@ -1082,6 +1087,8 @@ MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "4"))  # tool rounds per
 # Gemini model. Default: when web search is ON, tools are OFF. Set to 1 to try both.
 ALLOW_MIXED_TOOLS = os.environ.get("ALLOW_MIXED_TOOLS", "0") == "1"
 TOOL_RESULT_MAX_CHARS = 8000
+# DEBUG_TIMING=1 shows "first word after X s" lines in the chat (temporary, to find slow spots).
+DEBUG_TIMING = os.environ.get("DEBUG_TIMING", "0") == "1"
 
 TOOLS_HINT = (
     "\n\nYou can call tools. Use `calculate` for any arithmetic instead of computing"
@@ -1356,15 +1363,27 @@ def stream_with_tools(client, model_name, contents, system_instruction, tools,
     Tokens of ALL rounds are added up in `usage` (so analytics stay honest)."""
     convo = list(contents)  # local copy: a retry must start from a clean history
     total_p = total_c = 0
+    t_req = ctx.get("start") or time.time()  # when the request arrived
     try:
         for round_i in range(MAX_TOOL_ROUNDS + 1):
             # Last round: no tools, so Gemini is forced to write its answer.
             round_tools = tools if round_i < MAX_TOOL_ROUNDS else None
             config = make_config(system_instruction, round_tools, state["use_thinking"])
             calls, model_parts, round_usage = [], [], {}
+            t_round = time.time()
+            first_seen = False
             for chunk in client.models.generate_content_stream(
                 model=model_name, contents=convo, config=config
             ):
+                if not first_seen:
+                    first_seen = True
+                    msg = (
+                        f"round {round_i + 1}: Gemini answered after {time.time() - t_round:.1f}s"
+                        f" (request total {time.time() - t_req:.1f}s)"
+                    )
+                    print("[timing]", msg)
+                    if DEBUG_TIMING:
+                        yield ToolNote(f"\n\n> 🔧 ⏱ {msg}\n\n")
                 _capture_usage(chunk, round_usage)
                 cand = chunk.candidates[0] if chunk.candidates else None
                 if cand and cand.content and cand.content.parts:
@@ -1372,6 +1391,10 @@ def stream_with_tools(client, model_name, contents, system_instruction, tools,
                         model_parts.append(part)  # keep parts as-is (thought signatures)
                         if getattr(part, "function_call", None):
                             calls.append(part.function_call)
+                            # Tell the user AS SOON AS Gemini asks for the tool.
+                            yield ToolNote(
+                                f"\n\n> 🔧 *{TOOL_LABELS.get(part.function_call.name, part.function_call.name)}…*\n\n"
+                            )
                 if chunk.text:
                     yield chunk.text
             total_p += round_usage.get("p") or 0
@@ -1380,9 +1403,9 @@ def stream_with_tools(client, model_name, contents, system_instruction, tools,
                 return
             response_parts = []
             for fc in calls:
-                label = TOOL_LABELS.get(fc.name, fc.name)
-                yield ToolNote(f"\n\n> 🔧 *{label}…*\n\n")
+                t_tool = time.time()
                 result = run_tool(fc.name, dict(fc.args or {}), ctx)
+                print(f"[timing] tool {fc.name} took {time.time() - t_tool:.2f}s")
                 response_parts.append(
                     types.Part.from_function_response(name=fc.name, response={"result": result})
                 )
@@ -1403,6 +1426,8 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 body { background-color: #212121; color: #ececec; display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
@@ -1450,6 +1475,9 @@ header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justi
 .action-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.85rem; padding: 2px 6px; border-radius: 4px; display: flex; align-items: center; gap: 4px; }
 .action-btn:hover { color: #fff; background: #2f2f2f; }
 .msg-meta { font-size: 0.75rem; color: #666; margin-left: auto; }
+.katex { font-size: 1.08em; }
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 10px 0; }
+.wait-hint { color: #888; font-size: 0.85rem; margin-top: 4px; }
 .typing-dots { display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; }
 .typing-dot { width: 6px; height: 6px; background: #aaa; border-radius: 50%; animation: blink 1.4s infinite ease-in-out both; }
 .typing-dot:nth-child(1) { animation-delay: -0.32s; }
@@ -1975,11 +2003,47 @@ await startNewChat();
 await loadChat(chats[0].id);
 }
 }
-function safeParseMarkdown(str) {
-if (window.marked && typeof window.marked.parse === 'function') {
-try { return window.marked.parse(str); } catch (e) {}
+function renderMathSafe(tex, display) {
+if (window.katex) {
+try { return window.katex.renderToString(tex, { displayMode: display, throwOnError: false }); } catch (e) {}
 }
-return escapeHtml(str).replace(/\n/g, '<br>');
+return '<code>' + escapeHtml(tex) + '</code>';
+}
+function safeParseMarkdown(str) {
+str = String(str == null ? '' : str);
+const codes = [];
+const maths = [];
+// 1) Code stays untouched (a "$" inside code is not a formula).
+str = str.replace(/```[\s\S]*?(?:```|$)|`[^`\n]+`/g, (m) => { codes.push(m); return '@@CD' + (codes.length - 1) + 'D@@'; });
+// 2) Formulas are rendered with KaTeX and hidden from markdown (it would break them).
+const keep = (tex, display) => { maths.push(renderMathSafe(tex.trim(), display)); return '@@KX' + (maths.length - 1) + 'X@@'; };
+str = str.replace(/\$\$([\s\S]+?)\$\$/g, (m, t) => keep(t, true));
+str = str.replace(/\\\[([\s\S]+?)\\\]/g, (m, t) => keep(t, true));
+str = str.replace(/\\\(([\s\S]+?)\\\)/g, (m, t) => keep(t, false));
+// Single $...$ : not "$5 and $10" (prices): no space after the first $, no digit after the last one.
+str = str.replace(/\$([^\s$](?:[^$\n]*?[^\s$])?)\$(?!\d)/g, (m, t) => keep(t, false));
+str = str.replace(/@@CD(\d+)D@@/g, (m, i) => codes[+i]);
+let html;
+if (window.marked && typeof window.marked.parse === 'function') {
+try { html = window.marked.parse(str); } catch (e) {}
+}
+if (html === undefined) html = escapeHtml(str).replace(/\n/g, '<br>');
+return html.replace(/@@KX(\d+)X@@/g, (m, i) => maths[+i]);
+}
+// Live "still working" counter while the first word has not arrived yet.
+let _waitInterval = null;
+function startWaitTimer(el) {
+stopWaitTimer();
+const t0 = Date.now();
+_waitInterval = setInterval(() => {
+const s = Math.round((Date.now() - t0) / 1000);
+if (s >= 4) {
+el.innerHTML = '<div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div><div class="wait-hint">⏳ Still working… ' + s + 's</div>';
+}
+}, 1000);
+}
+function stopWaitTimer() {
+if (_waitInterval) { clearInterval(_waitInterval); _waitInterval = null; }
 }
 function escapeHtml(text) {
 if (!text) return '';
@@ -3017,6 +3081,7 @@ return;
 }
 contentDiv.innerHTML = '<div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>';
 }
+startWaitTimer(contentDiv);
 const res = await fetch('/api/chat', {
 method: 'POST',
 headers: getAuthHeaders(),
@@ -3043,6 +3108,7 @@ const decoder = new TextDecoder();
 while (true) {
 const { done, value } = await reader.read();
 if (done) break;
+stopWaitTimer();
 fullText += decoder.decode(value, { stream: true });
 contentDiv.innerHTML = safeParseMarkdown(fullText);
 const box = document.getElementById('chat-box');
@@ -3069,6 +3135,7 @@ currentHistory.pop();
 currentHistory.push({ role: 'model', content: fullText });
 }
 } finally {
+stopWaitTimer();
 isStreaming = false;
 activeAbortController = null;
 updateSendBtnUI(false);
@@ -4051,7 +4118,7 @@ def chat_endpoint(
                     if web_search
                     else None
                 )
-            tool_ctx = {"user": user, "chat_id": chat_id}
+            tool_ctx = {"user": user, "chat_id": chat_id, "start": start_time}
 
             def make_stream():
                 usage.clear()
