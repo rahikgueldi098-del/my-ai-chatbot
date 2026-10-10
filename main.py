@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import zipfile
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
@@ -408,6 +409,66 @@ def check_daily_quota(user: Any) -> bool:
     return True
 
 
+# --- Original files live in Supabase Storage (private bucket, one folder per user) ---
+STORAGE_BUCKET = os.environ.get("STORAGE_BUCKET", "user-files")
+
+
+def safe_storage_name(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", name or "file")[:100].strip(".")
+    return cleaned or "file"
+
+
+def _storage_headers(user: "AuthUser", content_type: Optional[str] = None) -> dict:
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {user.token}"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
+
+
+def storage_put(user: "AuthUser", path: str, data: bytes, content_type: str) -> bool:
+    import httpx
+
+    r = httpx.post(
+        f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{quote(path, safe='/')}",
+        headers=_storage_headers(user, content_type or "application/octet-stream"),
+        content=data,
+        timeout=30,
+    )
+    if r.status_code not in (200, 201):
+        print("Storage upload failed:", r.status_code, r.text[:200])
+        return False
+    return True
+
+
+def storage_get(user: "AuthUser", path: str) -> Optional[bytes]:
+    import httpx
+
+    r = httpx.get(
+        f"{SUPABASE_URL}/storage/v1/object/authenticated/{STORAGE_BUCKET}/{quote(path, safe='/')}",
+        headers=_storage_headers(user),
+        timeout=30,
+    )
+    return r.content if r.status_code == 200 else None
+
+
+def storage_delete(user: "AuthUser", paths: List[str]) -> None:
+    paths = [p for p in paths if p]
+    if not paths:
+        return
+    try:
+        import httpx
+
+        httpx.request(
+            "DELETE",
+            f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}",
+            headers=_storage_headers(user, "application/json"),
+            json={"prefixes": paths},
+            timeout=30,
+        )
+    except Exception as ex:
+        print("Storage delete failed:", ex)
+
+
 def decode_file(file_payload: dict):
     _, b64 = file_payload["data"].split(",", 1)
     file_bytes = base64.b64decode(b64)
@@ -744,14 +805,30 @@ def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
             pass
         raise
     # Keep the original file so the user can open it later by clicking it.
+    # First choice: Supabase Storage. Fallback: the old document_files table.
+    stored = False
+    storage_path = f"{user.id}/{doc['id']}/{safe_storage_name(name)}"
     try:
-        user.db.table("document_files").insert({
-            "document_id": doc["id"],
-            "user_id": user.id,
-            "data": file_payload["data"],
-        }).execute()
+        if storage_put(user, storage_path, file_bytes, mime):
+            try:
+                user.db.table("documents").update({"storage_path": storage_path}).eq(
+                    "id", doc["id"]
+                ).execute()
+                stored = True
+            except Exception as ex:
+                print("storage_path column missing? Using the old table:", ex)
+                storage_delete(user, [storage_path])
     except Exception as ex:
-        print("Could not keep the original file:", ex)
+        print("Storage unavailable, using the old table:", ex)
+    if not stored:
+        try:
+            user.db.table("document_files").insert({
+                "document_id": doc["id"],
+                "user_id": user.id,
+                "data": file_payload["data"],
+            }).execute()
+        except Exception as ex:
+            print("Could not keep the original file:", ex)
     result = {"id": doc["id"], "name": name, "chunks": len(chunks)}
     if zipped:
         result["files"] = len(pages)
@@ -1074,6 +1151,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <div id="auth-msg"></div>
 <button id="auth-submit" onclick="submitAuth()">Log in</button>
 <a id="auth-switch" href="#" onclick="toggleAuthMode(); return false;">No account? Sign up</a>
+<div id="oauth-box" style="display:none;margin-top:14px;border-top:1px solid #333;padding-top:14px;flex-direction:column;gap:8px;"></div>
 </div>
 </div>
 <div id="docs-modal" class="modal-overlay" onclick="if(event.target===this) closeDocsModal()">
@@ -1241,6 +1319,54 @@ async function submitAuth() {
     setAuthMsg('Network error. Try again.', 'err');
   } finally {
     btn.disabled = false;
+  }
+}
+let oauthCfg = null;
+async function loadOAuthButtons() {
+  try {
+    const r = await _origFetch('/api/auth/config');
+    oauthCfg = await r.json();
+  } catch (e) { return; }
+  const box = document.getElementById('oauth-box');
+  if (!box || !oauthCfg || !oauthCfg.providers || !oauthCfg.providers.length) return;
+  const labels = { google: 'Continue with Google', github: 'Continue with GitHub' };
+  box.innerHTML = '';
+  oauthCfg.providers.forEach(p => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'toggle-btn';
+    b.style.cssText = 'width:100%;padding:10px;font-size:0.9rem;color:#ececec;';
+    b.textContent = labels[p] || p;
+    b.onclick = () => startOAuth(p);
+    box.appendChild(b);
+  });
+  box.style.display = 'flex';
+}
+function startOAuth(provider) {
+  if (!oauthCfg || !oauthCfg.authorize_url) return;
+  const redirect = encodeURIComponent(window.location.origin + '/');
+  window.location.href = oauthCfg.authorize_url + '?provider=' + encodeURIComponent(provider) + '&redirect_to=' + redirect;
+}
+function jwtEmail(token) {
+  try {
+    const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = decodeURIComponent(atob(part).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
+    return JSON.parse(json).email || '';
+  } catch (e) { return ''; }
+}
+// Coming back from Google/GitHub: the session arrives in the URL after the '#'.
+function handleOAuthRedirect() {
+  const hash = window.location.hash || '';
+  if (hash.length < 2) return;
+  const params = new URLSearchParams(hash.slice(1));
+  const access = params.get('access_token');
+  const err = params.get('error_description') || params.get('error');
+  if (!access && !err) return;
+  try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (e) {}
+  if (access) {
+    saveSession({ access_token: access, refresh_token: params.get('refresh_token') || '', email: jwtEmail(access) });
+  } else {
+    showAuth(String(err).replace(/\+/g, ' '));
   }
 }
 function logout() {
@@ -2582,7 +2708,7 @@ return `<tr>
 }).join('');
 } catch (e) {}
 }
-window.addEventListener('DOMContentLoaded', () => { updateUserBox(); initStorage(); });
+window.addEventListener('DOMContentLoaded', () => { handleOAuthRedirect(); updateUserBox(); loadOAuthButtons(); initStorage(); });
 </script>
 </body>
 </html>"""
@@ -2607,6 +2733,22 @@ def _session_payload(res: Any) -> Dict[str, Any]:
         "refresh_token": session.refresh_token,
         "email": getattr(user, "email", None),
     }
+
+
+OAUTH_PROVIDERS = [
+    p.strip().lower()
+    for p in os.environ.get("OAUTH_PROVIDERS", "google,github").split(",")
+    if p.strip() in ("google", "github")
+]
+
+
+@app.get("/api/auth/config")
+def auth_config():
+    """Public info the login screen needs for the 'Continue with Google/GitHub' buttons."""
+    return JSONResponse({
+        "authorize_url": f"{SUPABASE_URL}/auth/v1/authorize" if SUPABASE_URL else "",
+        "providers": OAUTH_PROVIDERS if SUPABASE_URL else [],
+    })
 
 
 @app.post("/api/auth/signup")
@@ -2745,9 +2887,17 @@ def delete_chat(chat_id: str, user: AuthUser = Depends(require_user)):
     try:
         if not _owns_chat(user, chat_id):
             return JSONResponse({"detail": "Chat not found."}, status_code=404)
+        paths = []
+        try:
+            rows = (user.db.table("documents").select("storage_path")
+                    .eq("chat_id", chat_id).eq("user_id", user.id).execute().data or [])
+            paths = [r.get("storage_path") for r in rows]
+        except Exception:
+            pass
         user.db.table("documents").delete().eq("chat_id", chat_id).eq(
             "user_id", user.id
         ).execute()
+        storage_delete(user, paths)
         user.db.table("messages").delete().eq("chat_id", chat_id).execute()
         user.db.table("chats").delete().eq("id", chat_id).eq(
             "user_id", user.id
@@ -2774,7 +2924,7 @@ def list_documents(chat_id: str, user: AuthUser = Depends(require_user)):
 
 
 @app.post("/api/chats/{chat_id}/documents")
-def images_in(
+def upload_document(
     chat_id: str,
     body: DocumentUploadRequest,
     request: Request,
@@ -2808,8 +2958,16 @@ def images_in(
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: str, user: AuthUser = Depends(require_user)):
     try:
+        paths = []
+        try:
+            rows = (user.db.table("documents").select("storage_path")
+                    .eq("id", doc_id).eq("user_id", user.id).execute().data or [])
+            paths = [r.get("storage_path") for r in rows]
+        except Exception:
+            pass
         # Chunks are removed automatically (ON DELETE CASCADE).
         user.db.table("documents").delete().eq("id", doc_id).eq("user_id", user.id).execute()
+        storage_delete(user, paths)
         return JSONResponse({"status": "deleted"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -2817,15 +2975,26 @@ def delete_document(doc_id: str, user: AuthUser = Depends(require_user)):
 @app.get("/api/documents/{doc_id}/file")
 def get_document_file(doc_id: str, user: AuthUser = Depends(require_user)):
     try:
-        doc = (user.db.table("documents").select("mime_type")
-               .eq("id", doc_id).eq("user_id", user.id).limit(1).execute().data)
+        try:
+            doc = (user.db.table("documents").select("mime_type,storage_path")
+                   .eq("id", doc_id).eq("user_id", user.id).limit(1).execute().data)
+        except Exception:  # storage_path column not created yet
+            doc = (user.db.table("documents").select("mime_type")
+                   .eq("id", doc_id).eq("user_id", user.id).limit(1).execute().data)
+        if not doc:
+            return JSONResponse({"detail": "Original file not stored."}, status_code=404)
+        media = doc[0].get("mime_type") or "application/octet-stream"
+        path = doc[0].get("storage_path")
+        if path:
+            data = storage_get(user, path)
+            if data is not None:
+                return Response(content=data, media_type=media)
         f = (user.db.table("document_files").select("data")
              .eq("document_id", doc_id).limit(1).execute().data)
-        if not doc or not f:
+        if not f:
             return JSONResponse({"detail": "Original file not stored."}, status_code=404)
         file_bytes, _, _ = decode_file({"data": f[0]["data"]})
-        return Response(content=file_bytes,
-                        media_type=doc[0].get("mime_type") or "application/octet-stream")
+        return Response(content=file_bytes, media_type=media)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -3162,13 +3331,13 @@ def chat_endpoint(
                 ],
                 "indexed": True,
             }
-        images_in = [
+        storage_put = [
             im for im in (body.images or [])[:MAX_IMAGES_PER_MESSAGE]
             if isinstance(im, dict)
             and str(im.get("type", "")).startswith("image/")
             and "data" in im
         ]
-        if images_in:
+        if storage_put:
             # Keep the (small) pictures so they reappear when the chat is reopened.
             saved_file_payload = {
                 "multi": [
@@ -3178,7 +3347,7 @@ def chat_endpoint(
                         "size": im.get("size"),
                         "data": im["data"],
                     }
-                    for im in images_in
+                    for im in storage_put
                 ]
             }
         if RAG_ENABLED and chat_id:
@@ -3237,9 +3406,9 @@ def chat_endpoint(
                 parts.append(
                     types.Part.from_text(text="Please summarize the attached document.")
                 )
-            elif images_in:
+            elif storage_put:
                 parts.append(types.Part.from_text(text="Please describe the attached images."))
-            for im in images_in:
+            for im in storage_put:
                 im_bytes, im_mime, _ = decode_file(im)
                 parts.append(types.Part.from_bytes(data=im_bytes, mime_type=im_mime))
             if file_payload and "data" in file_payload and not indexed_doc:
@@ -3294,7 +3463,7 @@ def chat_endpoint(
                 legacy_history.append({"role": role, "parts": [text]})
 
             prompt_content = [message] if message else []
-            for im in images_in:
+            for im in storage_put:
                 im_bytes, im_mime, _ = decode_file(im)
                 prompt_content.append({"mime_type": im_mime, "data": im_bytes})
             if file_payload and "data" in file_payload and not indexed_doc:
