@@ -209,6 +209,15 @@ class AuthRequest(BaseModel):
     password: str
 
 
+class EmailRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    access_token: str
+    password: str
+
+
 class RenameChatRequest(BaseModel):
     title: str
 
@@ -514,6 +523,36 @@ def save_message(
             db.table("messages").insert(payload).execute()
         except Exception as ex:
             print(f"Failed to save {role} message:", ex)
+
+
+def externalize_images(user: "AuthUser", payload: Optional[dict]) -> Optional[dict]:
+    """Moves picture data out of the messages table into Supabase Storage.
+    If Storage fails, the picture simply stays inline (nothing is lost)."""
+    if not payload:
+        return payload
+
+    def one(f):
+        if not isinstance(f, dict) or "data" not in f:
+            return f
+        if not str(f.get("type", "")).startswith("image/"):
+            return f
+        try:
+            raw, mime, name = decode_file(f)
+            path = f"{user.id}/images/{int(time.time() * 1000)}-{os.urandom(4).hex()}-{safe_storage_name(name)}"
+            if storage_put(user, path, raw, mime):
+                return {"name": name, "type": mime, "size": f.get("size") or len(raw), "path": path}
+        except Exception as ex:
+            print("Could not move the picture to Storage:", ex)
+        return f
+
+    if isinstance(payload.get("multi"), list):
+        return {**payload, "multi": [one(f) for f in payload["multi"]]}
+    return one(payload)
+
+
+def _save_turn_with_files(user: "AuthUser", chat_id: str, message: str,
+                          file_payload: Optional[dict]):
+    save_user_turn(user.db, chat_id, message, externalize_images(user, file_payload), user.id)
 
 
 def save_user_turn(
@@ -1773,6 +1812,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <input id="auth-password" class="auth-input" type="password" name="password" placeholder="Password (min 6 characters)" autocomplete="current-password" onkeydown="if(event.key==='Enter') submitAuth()">
 <div id="auth-msg"></div>
 <button id="auth-submit" onclick="submitAuth()">Log in</button>
+<a id="auth-forgot" href="#" onclick="forgotPassword(); return false;" style="font-size:0.8rem;">Forgot password?</a>
 <a id="auth-switch" href="#" onclick="toggleAuthMode(); return false;">No account? Sign up</a>
 <div id="oauth-box" style="display:none;margin-top:14px;border-top:1px solid #333;padding-top:14px;flex-direction:column;gap:8px;"></div>
 </div>
@@ -1901,19 +1941,69 @@ function setAuthMsg(text, kind) {
   el.textContent = text || '';
   el.className = kind || '';
 }
+let resetToken = null;
 function setAuthMode(mode) {
   authMode = mode;
   const login = mode === 'login';
-  document.getElementById('auth-title').textContent = login ? '🔐 Log in' : '📝 Create account';
-  document.getElementById('auth-submit').textContent = login ? 'Log in' : 'Sign up';
+  const reset = mode === 'reset';
+  document.getElementById('auth-title').textContent = reset ? '🔑 Choose a new password' : (login ? '🔐 Log in' : '📝 Create account');
+  document.getElementById('auth-submit').textContent = reset ? 'Save new password' : (login ? 'Log in' : 'Sign up');
   document.getElementById('auth-switch').textContent = login ? 'No account? Sign up' : 'Already have an account? Log in';
+  document.getElementById('auth-switch').style.display = reset ? 'none' : '';
+  document.getElementById('auth-forgot').style.display = login ? '' : 'none';
+  document.getElementById('auth-email').style.display = reset ? 'none' : '';
+  document.getElementById('auth-password').placeholder = reset ? 'New password (min 6 characters)' : 'Password (min 6 characters)';
   document.getElementById('auth-password').autocomplete = login ? 'current-password' : 'new-password';
+  const ob = document.getElementById('oauth-box');
+  if (ob) ob.style.visibility = reset ? 'hidden' : '';
+}
+async function forgotPassword() {
+  const email = document.getElementById('auth-email').value.trim();
+  if (!email) { setAuthMsg('Type your email above first, then click "Forgot password?".', 'err'); return; }
+  setAuthMsg('Please wait...', '');
+  try {
+    const r = await _origFetch('/api/auth/forgot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { setAuthMsg(d.detail || ('Error ' + r.status), 'err'); return; }
+    setAuthMsg('If this email has an account, we sent a link to reset the password. Check your inbox (and spam).', 'ok');
+  } catch (e) {
+    setAuthMsg('Network error. Try again.', 'err');
+  }
 }
 function toggleAuthMode() {
   setAuthMode(authMode === 'login' ? 'signup' : 'login');
   setAuthMsg('', '');
 }
+async function submitReset() {
+  const password = document.getElementById('auth-password').value;
+  if (password.length < 6) { setAuthMsg('The password needs at least 6 characters.', 'err'); return; }
+  const btn = document.getElementById('auth-submit');
+  btn.disabled = true;
+  setAuthMsg('Please wait...', '');
+  try {
+    const r = await _origFetch('/api/auth/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ access_token: resetToken, password })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { setAuthMsg(d.detail || ('Error ' + r.status), 'err'); return; }
+    resetToken = null;
+    document.getElementById('auth-password').value = '';
+    setAuthMode('login');
+    setAuthMsg('Password changed. Log in with your new password.', 'ok');
+  } catch (e) {
+    setAuthMsg('Network error. Try again.', 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
 async function submitAuth() {
+  if (authMode === 'reset') return submitReset();
   const email = document.getElementById('auth-email').value.trim();
   const password = document.getElementById('auth-password').value;
   if (!email || !password) { setAuthMsg('Enter your email and password.', 'err'); return; }
@@ -2036,7 +2126,13 @@ function handleOAuthRedirect() {
   const err = params.get('error_description') || params.get('error');
   if (!access && !err) return;
   try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (e) {}
-  if (access) {
+  if (access && params.get('type') === 'recovery') {
+    // Link from the "reset your password" email: ask for a new password, do not log in yet.
+    resetToken = access;
+    setAuthMode('reset');
+    showAuth();
+    setAuthMsg('Choose your new password.', 'ok');
+  } else if (access) {
     saveSession({ access_token: access, refresh_token: params.get('refresh_token') || '', email: jwtEmail(access) });
   } else {
     showAuth(String(err).replace(/\+/g, ' '));
@@ -2333,6 +2429,10 @@ async function openAttachment(fileObj) {
       const res = await fetch(`/api/documents/${fileObj.doc_id}/file`, { headers: getAuthHeaders() });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       blob = await res.blob();
+    } else if (fileObj.path) {
+      const res = await fetch('/api/files/image?path=' + encodeURIComponent(fileObj.path), { headers: getAuthHeaders() });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      blob = await res.blob();
     } else {
       throw new Error('not stored');
     }
@@ -2345,6 +2445,14 @@ async function openAttachment(fileObj) {
     alert('The original file is not available.');
   }
 }
+function setImageSource(img, f) {
+  if (f.data) { img.src = f.data; return; }
+  if (!f.path) return;
+  fetch('/api/files/image?path=' + encodeURIComponent(f.path), { headers: getAuthHeaders() })
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then(b => { img.src = URL.createObjectURL(b); })
+    .catch(() => { img.alt = '(picture not available)'; });
+}
 function appendMessageUI(role, text, fileObj, metaObj) {
 const box = document.getElementById('chat-box');
 if (!box) return;
@@ -2352,9 +2460,9 @@ const msgDiv = document.createElement('div');
 msgDiv.className = `message ${role}`;
 if (fileObj && Array.isArray(fileObj.multi)) {
 fileObj.multi.forEach(f => {
-if (f.type && f.type.startsWith('image/') && f.data) {
+if (f.type && f.type.startsWith('image/') && (f.data || f.path)) {
 const im = document.createElement('img');
-im.src = f.data;
+setImageSource(im, f);
 im.style.cursor = 'pointer';
 im.style.maxWidth = '48%';
 im.style.marginRight = '4px';
@@ -2375,7 +2483,7 @@ msgDiv.appendChild(badge);
 } else if (fileObj) {
 if (fileObj.type && fileObj.type.startsWith('image/')) {
 const img = document.createElement('img');
-img.src = fileObj.data;
+setImageSource(img, fileObj);
 img.style.cursor = 'pointer';
 img.onclick = () => openAttachment(fileObj);
 msgDiv.appendChild(img);
@@ -3937,6 +4045,84 @@ def auth_login(body: AuthRequest, request: Request):
         return JSONResponse({"detail": str(e)}, status_code=400)
 
 
+def _site_origin(request: Request) -> str:
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if origin.startswith("http"):
+        return origin
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    proto = request.headers.get("x-forwarded-proto") or "https"
+    return f"{proto}://{host}" if host else ""
+
+
+@app.post("/api/auth/forgot")
+def auth_forgot(body: EmailRequest, request: Request):
+    """Sends the 'reset your password' email. Always answers the same, so nobody can
+    use this to find out which emails have an account."""
+    if not supabase:
+        return JSONResponse({"detail": "Supabase is not configured."}, status_code=503)
+    if not check_rate_limit(f"forgot:{get_client_ip(request)}", 5):
+        return JSONResponse({"detail": "Too many attempts. Wait a minute."}, status_code=429)
+    email = body.email.strip().lower()
+    if "@" not in email:
+        return JSONResponse({"detail": "Enter a valid email."}, status_code=400)
+    try:
+        import httpx
+
+        r = httpx.post(
+            f"{SUPABASE_URL}/auth/v1/recover",
+            params={"redirect_to": _site_origin(request) + "/"},
+            headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+            json={"email": email},
+            timeout=15,
+        )
+        if r.status_code == 429:
+            return JSONResponse(
+                {"detail": "Too many reset emails. Try again in a few minutes."}, status_code=429
+            )
+        if r.status_code >= 400:
+            print("Password reset email failed:", r.status_code, r.text[:200])
+    except Exception as ex:
+        print("Password reset email failed:", ex)
+    return JSONResponse({"status": "sent"})
+
+
+@app.post("/api/auth/reset")
+def auth_reset(body: ResetPasswordRequest, request: Request):
+    """Sets the new password using the one-time token from the reset email."""
+    if not supabase:
+        return JSONResponse({"detail": "Supabase is not configured."}, status_code=503)
+    if not check_rate_limit(f"reset:{get_client_ip(request)}", 10):
+        return JSONResponse({"detail": "Too many attempts. Wait a minute."}, status_code=429)
+    if len(body.password) < 6:
+        return JSONResponse({"detail": "The password needs at least 6 characters."}, status_code=400)
+    try:
+        import httpx
+
+        r = httpx.put(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {body.access_token}",
+                "Content-Type": "application/json",
+            },
+            json={"password": body.password},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            try:
+                msg = r.json().get("msg") or r.json().get("message") or ""
+            except Exception:
+                msg = ""
+            return JSONResponse(
+                {"detail": msg or "The reset link is invalid or expired. Ask for a new one."},
+                status_code=400,
+            )
+        return JSONResponse({"status": "ok"})
+    except Exception as ex:
+        print("Password reset failed:", ex)
+        return JSONResponse({"detail": "Could not change the password."}, status_code=500)
+
+
 @app.post("/api/auth/refresh")
 def auth_refresh(body: RefreshRequest):
     if not supabase:
@@ -4041,6 +4227,17 @@ def delete_chat(chat_id: str, user: AuthUser = Depends(require_user)):
             rows = (user.db.table("documents").select("storage_path")
                     .eq("chat_id", chat_id).eq("user_id", user.id).execute().data or [])
             paths = [r.get("storage_path") for r in rows]
+        except Exception:
+            pass
+        try:
+            for m in (user.db.table("messages").select("file_payload")
+                      .eq("chat_id", chat_id).execute().data or []):
+                fp = m.get("file_payload") or {}
+                if isinstance(fp, dict):
+                    paths.append(fp.get("path"))
+                    for f in fp.get("multi") or []:
+                        if isinstance(f, dict):
+                            paths.append(f.get("path"))
         except Exception:
             pass
         user.db.table("documents").delete().eq("chat_id", chat_id).eq(
@@ -4193,6 +4390,24 @@ def delete_document(doc_id: str, user: AuthUser = Depends(require_user)):
         return JSONResponse({"status": "deleted"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/files/image")
+def get_stored_image(path: str, user: AuthUser = Depends(require_user)):
+    """Serves a picture the user attached (kept in Storage, only for its owner)."""
+    if not path.startswith(f"{user.id}/images/") or ".." in path:
+        return JSONResponse({"detail": "Not found."}, status_code=404)
+    try:
+        import mimetypes
+
+        data = storage_get(user, path)
+        if data is None:
+            return JSONResponse({"detail": "Not found."}, status_code=404)
+        media = mimetypes.guess_type(path)[0] or "image/jpeg"
+        return Response(content=data, media_type=media,
+                        headers={"Cache-Control": "private, max-age=3600"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 @app.get("/api/documents/{doc_id}/file")
 def get_document_file(doc_id: str, user: AuthUser = Depends(require_user)):
@@ -4590,7 +4805,7 @@ def chat_endpoint(
         save_future = None
         if chat_id and message:
             save_future = _executor.submit(
-                save_user_turn, user.db, chat_id, message, saved_file_payload, user_id
+                _save_turn_with_files, user, chat_id, message, saved_file_payload
             )
 
         prompt_tokens_est = estimate_tokens(message) + estimate_tokens(
