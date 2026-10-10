@@ -102,7 +102,7 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception as e:
         print(f"Erreur d'initialisation Supabase: {e}")
 
-app = FastAPI(title="AI Assistant Studio Pro")
+app = FastAPI(title="NOVA AI")
 
 # Thread pool used to save to Supabase WITHOUT blocking the AI response.
 _executor = ThreadPoolExecutor(max_workers=4)
@@ -1619,7 +1619,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Assistant Studio Pro</title>
+<title>NOVA AI</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -1816,7 +1816,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <header>
 <div class="header-left">
 <button id="menu-btn" onclick="toggleSidebar()">☰</button>
-<span>AI Assistant Studio Pro</span>
+<span>NOVA AI</span>
 </div>
 <div class="header-controls">
 <button id="analytics-btn" class="admin-btn" style="display:none;" onclick="openAnalyticsModal()">📊 Analytics</button>
@@ -4051,7 +4051,7 @@ def serve_gui():
 
 # --- Legal pages (Google login asks for a privacy policy and terms link) ---
 LEGAL_CONTACT = os.environ.get("LEGAL_CONTACT_EMAIL", "rahikgueldi098@gmail.com")
-APP_DISPLAY_NAME = os.environ.get("APP_NAME", "Nova AI")
+APP_DISPLAY_NAME = os.environ.get("APP_NAME", "NOVA AI")
 
 
 def _legal_page(title: str, body_html: str) -> str:
