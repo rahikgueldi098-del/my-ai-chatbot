@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
@@ -45,6 +46,7 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-001")
 EMBEDDING_DIM = 768  # must match vector(768) in rag_setup.sql
 CHUNK_SIZE = int(os.environ.get("RAG_CHUNK_SIZE", "1000"))      # characters
 CHUNK_OVERLAP = int(os.environ.get("RAG_CHUNK_OVERLAP", "150"))  # characters
+HYBRID_SEARCH = os.environ.get("RAG_HYBRID", "1") != "0"
 TOP_K = int(os.environ.get("RAG_TOP_K", "6"))                    # chunks sent to Gemini
 # Documents (all of a chat's files together) up to this size are sent WHOLE:
 # better for "summarize this" questions and no search needed.
@@ -54,7 +56,26 @@ MAX_UPLOAD_BYTES = int(os.environ.get("RAG_MAX_UPLOAD_BYTES", str(4_000_000)))
 EMBED_BATCH = 50
 # Price per 1M embedding tokens (USD). Check your embedding model's price and set it in Vercel.
 EMBEDDING_USD_PER_M = float(os.environ.get("EMBEDDING_USD_PER_M", "0.15")) / 1_000_000
-INDEXABLE_EXTS = (".pdf", ".txt", ".md", ".csv", ".json", ".py", ".js", ".html", ".css")
+INDEXABLE_EXTS = (
+    ".pdf", ".txt", ".md", ".csv", ".json", ".py", ".js", ".html", ".css",
+    ".ts", ".tsx", ".jsx", ".java", ".c", ".h", ".cpp", ".cs", ".go", ".rs",
+    ".php", ".rb", ".sql", ".yml", ".yaml", ".toml", ".xml", ".sh", ".ini",
+    ".cfg", ".log",
+)
+# --- Zip uploads (a whole codebase / folder of documents in one file) ---
+ZIP_MAX_FILES = int(os.environ.get("RAG_ZIP_MAX_FILES", "150"))
+ZIP_MAX_MEMBER_BYTES = 300_000      # bigger single files inside a zip are skipped
+ZIP_MAX_TOTAL_BYTES = 6_000_000     # total text read from one zip (zip-bomb guard)
+ZIP_MAX_CHUNKS = int(os.environ.get("RAG_ZIP_MAX_CHUNKS", "600"))
+ZIP_TEXT_EXTS = tuple(e for e in INDEXABLE_EXTS if e != ".pdf")
+ZIP_SKIP_DIRS = {
+    "node_modules", ".git", "__pycache__", "venv", ".venv", "env", "dist", "build",
+    ".next", ".idea", ".vscode", "__macosx", "vendor", "site-packages", "target",
+    "coverage",
+}
+ZIP_SKIP_FILES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "composer.lock",
+}
 _embed_pool = ThreadPoolExecutor(max_workers=4)
 
 DOC_HINT = (
@@ -195,11 +216,17 @@ class CreateChatRequest(BaseModel):
     title: Optional[str] = "New Discussion"
 
 
+class DocumentUploadRequest(BaseModel):
+    file: Dict[str, Any]
+
+
 class ChatRequest(BaseModel):
     chat_id: Optional[str] = "default_chat"
     message: str = ""
     history: List[Dict[str, Any]] = []
     file: Optional[Dict[str, Any]] = None
+    # Several documents uploaded one by one beforehand: only their names/ids.
+    attached: Optional[List[Dict[str, Any]]] = None
     system_instruction: str = "You are a helpful assistant."
     # Web search makes every answer slower, so it is OFF unless requested.
     web_search: bool = False
@@ -435,6 +462,61 @@ def save_user_turn(
 
 
 # --- RAG helpers (Pillar 2) ---
+def is_zip_file(mime: str, name: str) -> bool:
+    return (name or "").lower().endswith(".zip") or (mime or "").lower() in (
+        "application/zip", "application/x-zip-compressed",
+    )
+
+
+def read_zip_pages(file_bytes: bytes):
+    """Reads the text/code files inside a zip. Returns ([(path, text), ...], skipped_count).
+    Nothing is extracted to disk and every size is capped (zip-bomb safe)."""
+    pages: List[tuple] = []
+    skipped = 0
+    total = 0
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(file_bytes))
+    except zipfile.BadZipFile:
+        raise ValueError("This zip file looks corrupted.")
+    with zf:
+        infos = [i for i in zf.infolist() if not i.is_dir()]
+        infos.sort(key=lambda i: (i.filename.count("/"), i.filename))
+        for info in infos:
+            path = info.filename.replace("\\", "/").lstrip("/")
+            parts = [p for p in path.split("/") if p]
+            base = parts[-1].lower() if parts else ""
+            if (
+                not parts
+                or any(p.lower() in ZIP_SKIP_DIRS for p in parts[:-1])
+                or base in ZIP_SKIP_FILES
+                or base.startswith("._")
+                or ".min." in base
+                or not base.endswith(ZIP_TEXT_EXTS)
+                or info.flag_bits & 0x1          # password-protected
+                or info.file_size > ZIP_MAX_MEMBER_BYTES
+                or len(pages) >= ZIP_MAX_FILES
+                or total >= ZIP_MAX_TOTAL_BYTES
+            ):
+                skipped += 1
+                continue
+            try:
+                with zf.open(info) as fh:
+                    raw = fh.read(ZIP_MAX_MEMBER_BYTES + 1)
+            except Exception:
+                skipped += 1
+                continue
+            if len(raw) > ZIP_MAX_MEMBER_BYTES or b"\x00" in raw[:2048]:
+                skipped += 1
+                continue
+            total += len(raw)
+            text = raw.decode("utf-8", errors="replace")
+            if text.strip():
+                pages.append((path, text))
+            else:
+                skipped += 1
+    return pages, skipped
+
+
 def is_indexable(file_payload: dict) -> bool:
     """PDFs and text-like files are indexed. Images keep going straight to Gemini."""
     mime = (file_payload.get("type") or "").lower()
@@ -442,7 +524,8 @@ def is_indexable(file_payload: dict) -> bool:
     if mime.startswith("image/"):
         return False
     return (
-        mime in ("application/pdf", "application/json")
+        is_zip_file(mime, name)
+        or mime in ("application/pdf", "application/json")
         or mime.startswith("text/")
         or name.endswith(INDEXABLE_EXTS)
     )
@@ -579,17 +662,31 @@ def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
         return {"id": existing[0]["id"], "name": name,
                 "chunks": existing[0]["chunk_count"], "reused": True}
 
-    pages = [(p, t) for p, t in extract_pages(file_bytes, mime, name, client) if t and t.strip()]
-    if not pages:
-        raise ValueError("No readable text found in this file.")
+    zipped = is_zip_file(mime, name)
+    zip_skipped = 0
+    if zipped:
+        pages, zip_skipped = read_zip_pages(file_bytes)
+        if not pages:
+            raise ValueError("No readable text or code files were found inside this zip.")
+    else:
+        pages = [(p, t) for p, t in extract_pages(file_bytes, mime, name, client) if t and t.strip()]
+        if not pages:
+            raise ValueError("No readable text found in this file.")
 
     chunks = []
     for page_no, text in pages:
         for piece in split_text(text):
-            chunks.append({"page": page_no, "content": piece})
+            if isinstance(page_no, str):   # zip member: keep its path inside the chunk
+                chunks.append({"page": None, "content": f"[{page_no}]\n{piece}"})
+            else:
+                chunks.append({"page": page_no, "content": piece})
     if not chunks:
         raise ValueError("No readable text found in this file.")
-    if len(chunks) > MAX_CHUNKS_PER_DOC:
+    if zipped:
+        if len(chunks) > ZIP_MAX_CHUNKS:
+            chunks = chunks[:ZIP_MAX_CHUNKS]
+            zip_skipped += 1
+    elif len(chunks) > MAX_CHUNKS_PER_DOC:
         raise ValueError("Document is too long to index.")
 
     vectors = embed_and_log(
@@ -599,9 +696,12 @@ def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
     char_count = sum(len(t) for _, t in pages)
     full_text = None
     if char_count <= FULL_CONTEXT_MAX_CHARS:
-        full_text = "\n\n".join(
-            (f"[Page {p}]\n{t.strip()}" if p else t.strip()) for p, t in pages
-        )
+        def _label(p, t):
+            if isinstance(p, str):
+                return f"=== {p} ===\n{t.strip()}"
+            return f"[Page {p}]\n{t.strip()}" if p else t.strip()
+
+        full_text = "\n\n".join(_label(p, t) for p, t in pages)
 
     doc = (
         user.db.table("documents")
@@ -649,7 +749,11 @@ def ingest_document(user: "AuthUser", chat_id: str, file_payload: dict, client,
         }).execute()
     except Exception as ex:
         print("Could not keep the original file:", ex)
-    return {"id": doc["id"], "name": name, "chunks": len(chunks)}
+    result = {"id": doc["id"], "name": name, "chunks": len(chunks)}
+    if zipped:
+        result["files"] = len(pages)
+        result["skipped"] = zip_skipped
+    return result
 
 
 def retrieval_query(message: str, history: List[Dict[str, Any]]) -> str:
@@ -688,15 +792,37 @@ def build_doc_context(user: "AuthUser", chat_id: str, query: str, client,
 
     # Larger documents: semantic search for the best chunks.
     qvec = embed_and_log(client, user, client_ip, [query], "RETRIEVAL_QUERY")[0]
-    rows = (
-        user.db.rpc(
-            "match_document_chunks",
-            {"query_embedding": qvec, "p_chat_id": chat_id, "match_count": TOP_K},
+    rows = []
+    if HYBRID_SEARCH:
+        # Keyword + meaning search merged together (needs hybrid_search.sql in Supabase).
+        try:
+            rows = (
+                user.db.rpc(
+                    "hybrid_match_document_chunks",
+                    {
+                        "query_embedding": qvec,
+                        "query_text": query[:500],
+                        "p_chat_id": chat_id,
+                        "match_count": TOP_K,
+                    },
+                )
+                .execute()
+                .data
+                or []
+            )
+        except Exception as ex:
+            print("Hybrid search unavailable, using meaning-only search:", ex)
+            rows = []
+    if not rows:
+        rows = (
+            user.db.rpc(
+                "match_document_chunks",
+                {"query_embedding": qvec, "p_chat_id": chat_id, "match_count": TOP_K},
+            )
+            .execute()
+            .data
+            or []
         )
-        .execute()
-        .data
-        or []
-    )
     parts = []
     for r in rows:
         where = f"{r['document_name']}, page {r['page']}" if r.get("page") else r["document_name"]
@@ -908,7 +1034,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <button id="remove-file-btn" onclick="clearFile()">✕</button>
 </div>
 <div id="input-container">
-<input type="file" id="file-input" accept="image/*,.pdf,.txt,.csv,.md,.json,.py,.js,.html,.css" onchange="handleFileSelect(event)">
+<input type="file" id="file-input" multiple accept="image/*,.pdf,.zip,.txt,.csv,.md,.json,.py,.js,.html,.css,.ts,.tsx,.jsx,.java,.c,.h,.cpp,.cs,.go,.rs,.php,.rb,.sql,.yml,.yaml,.toml,.xml,.sh" onchange="handleFileSelect(event)">
 <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Attach File">📎</button>
 <button id="mic-btn" class="icon-btn" onclick="toggleSpeechRecognition()" title="Voice Dictation">🎤</button>
 <button id="enhance-btn" class="icon-btn" onclick="enhanceCurrentPrompt()" title="Magic Wand: Enhance Prompt with AI">🪄</button>
@@ -1019,6 +1145,9 @@ let currentChatId = null;
 let currentHistory = [];
 let webSearchEnabled = false;
 let selectedFile = null;
+let selectedFiles = [];   // used when several documents are picked at once
+const MAX_FILE_BYTES = 3200000;
+const MAX_FILES_AT_ONCE = 20;
 let recognition = null;
 let isRecording = false;
 let isStreaming = false;
@@ -1371,7 +1500,7 @@ async function openAttachment(fileObj) {
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   } catch (e) {
     if (w) w.close();
-    alert('The original file is not available (it was attached before this feature existed).');
+    alert('The original file is not available.');
   }
 }
 function appendMessageUI(role, text, fileObj, metaObj) {
@@ -1379,7 +1508,19 @@ const box = document.getElementById('chat-box');
 if (!box) return;
 const msgDiv = document.createElement('div');
 msgDiv.className = `message ${role}`;
-if (fileObj) {
+if (fileObj && Array.isArray(fileObj.multi)) {
+fileObj.multi.forEach(f => {
+const badge = document.createElement('div');
+badge.className = 'doc-badge';
+badge.innerHTML = `📄 <strong>${escapeHtml(f.name || 'file')}</strong>`;
+if (f.doc_id) {
+badge.title = 'Click to open';
+badge.style.cursor = 'pointer';
+badge.onclick = () => openAttachment({ doc_id: f.doc_id, type: f.type });
+}
+msgDiv.appendChild(badge);
+});
+} else if (fileObj) {
 if (fileObj.type && fileObj.type.startsWith('image/')) {
 const img = document.createElement('img');
 img.src = fileObj.data;
@@ -1911,36 +2052,73 @@ event.preventDefault();
 handleSendOrStop();
 }
 }
-function handleFileSelect(e) {
-const file = e.target.files[0];
-if (!file) return;
-const reader = new FileReader();
-reader.onload = function(evt) {
-selectedFile = {
-name: file.name,
-type: file.type || 'text/plain',
-size: file.size,
-data: evt.target.result
-};
+function readFileAsDataURL(file) {
+return new Promise((resolve, reject) => {
+const r = new FileReader();
+r.onload = () => resolve(r.result);
+r.onerror = () => reject(r.error);
+r.readAsDataURL(file);
+});
+}
+async function handleFileSelect(e) {
+let files = Array.from(e.target.files || []);
+if (!files.length) return;
+const tooBig = files.filter(f => f.size > MAX_FILE_BYTES);
+if (tooBig.length) {
+alert('Too large (max ' + (MAX_FILE_BYTES / 1000000).toFixed(1) + ' MB each), skipped:\n' + tooBig.map(f => f.name).join('\n'));
+files = files.filter(f => f.size <= MAX_FILE_BYTES);
+}
+if (files.length > MAX_FILES_AT_ONCE) {
+alert('Maximum ' + MAX_FILES_AT_ONCE + ' files at once. Only the first ' + MAX_FILES_AT_ONCE + ' were kept.');
+files = files.slice(0, MAX_FILES_AT_ONCE);
+}
+const isImg = f => (f.type || '').startsWith('image/');
+if (files.length > 1 && files.some(isImg)) {
+alert('Images are sent one at a time, so they were left out. Only the documents were kept.');
+files = files.filter(f => !isImg(f));
+}
+if (!files.length) { clearFile(); return; }
+let payloads = [];
+try {
+for (const f of files) {
+const guessed = f.type || (/\.zip$/i.test(f.name) ? 'application/zip' : 'text/plain');
+payloads.push({ name: f.name, type: guessed, size: f.size, data: await readFileAsDataURL(f) });
+}
+} catch (err) {
+alert('Could not read the file.');
+clearFile();
+return;
+}
+selectedFile = null;
+selectedFiles = [];
 const preview = document.getElementById('file-preview');
 const previewImg = document.getElementById('preview-img');
 const previewIcon = document.getElementById('preview-icon');
 const fileName = document.getElementById('file-name');
-if (file.type && file.type.startsWith('image/')) {
-previewImg.src = evt.target.result;
+if (payloads.length === 1) {
+const p = payloads[0];
+selectedFile = p;
+if (p.type.startsWith('image/')) {
+previewImg.src = p.data;
 previewImg.style.display = 'block';
 previewIcon.innerText = '';
 } else {
 previewImg.style.display = 'none';
-previewIcon.innerText = '📄';
+previewIcon.innerText = /\.zip$/i.test(p.name) ? '🗜' : '📄';
 }
-fileName.innerText = `${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+fileName.innerText = `${p.name} (${(p.size / 1024).toFixed(1)} KB)`;
+} else {
+selectedFiles = payloads;
+previewImg.style.display = 'none';
+previewIcon.innerText = '📄';
+const total = payloads.reduce((n, p) => n + p.size, 0);
+fileName.innerText = `${payloads.length} files (${(total / 1024).toFixed(1)} KB)`;
+}
 preview.style.display = 'flex';
-};
-reader.readAsDataURL(file);
 }
 function clearFile() {
 selectedFile = null;
+selectedFiles = [];
 document.getElementById('file-input').value = '';
 document.getElementById('file-preview').style.display = 'none';
 }
@@ -2028,14 +2206,17 @@ return currentHistory
 }
 async function sendMessage() {
 const input = document.getElementById('user-input');
-const text = input ? input.value.trim() : '';
-if (!text && !selectedFile) return;
+let text = input ? input.value.trim() : '';
+const multi = selectedFiles.slice();
+if (!text && !selectedFile && !multi.length) return;
+if (!text && multi.length) text = 'Please summarize the attached files.';
 if (!currentChatId) {
 await startNewChat();
 }
 const filePayload = selectedFile;
-currentHistory.push({ role: 'user', content: text, file_payload: filePayload });
-appendMessageUI('user', text, filePayload);
+const shownFile = multi.length ? { multi: multi.map(f => ({ name: f.name, type: f.type, size: f.size })) } : filePayload;
+currentHistory.push({ role: 'user', content: text, file_payload: shownFile });
+const userDiv = appendMessageUI('user', text, shownFile);
 if (input) {
 input.value = '';
 input.style.height = 'auto';
@@ -2052,6 +2233,43 @@ contentDiv.innerHTML = '<div class="indexing-hint">📚 Reading and indexing you
 const systemPrompt = document.getElementById('persona-select').value;
 let fullText = '';
 try {
+let attachedList = null;
+if (multi.length) {
+attachedList = [];
+const failed = [];
+for (let i = 0; i < multi.length; i++) {
+contentDiv.innerHTML = `<div class="indexing-hint">📚 Indexing file ${i + 1} of ${multi.length}: ${escapeHtml(multi[i].name)}…</div>`;
+try {
+const up = await fetch(`/api/chats/${currentChatId}/documents`, {
+method: 'POST',
+headers: getAuthHeaders(),
+signal: activeAbortController.signal,
+body: JSON.stringify({ file: multi[i] })
+});
+const info = await up.json().catch(() => ({}));
+if (up.ok) {
+attachedList.push({ name: multi[i].name, type: multi[i].type, size: multi[i].size, doc_id: info.id });
+} else {
+failed.push(`${multi[i].name}: ${info.detail || info.error || ('HTTP ' + up.status)}`);
+}
+} catch (upErr) {
+if (upErr.name === 'AbortError') throw upErr;
+failed.push(`${multi[i].name}: ${upErr.message}`);
+}
+}
+if (failed.length && userDiv) {
+const warn = document.createElement('div');
+warn.className = 'error-box';
+warn.innerText = 'Could not index:\n' + failed.join('\n');
+userDiv.appendChild(warn);
+}
+if (!attachedList.length) {
+contentDiv.innerHTML = '<div class="error-box">None of the files could be indexed.</div>';
+currentHistory.pop();
+return;
+}
+contentDiv.innerHTML = '<div class="typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>';
+}
 const res = await fetch('/api/chat', {
 method: 'POST',
 headers: getAuthHeaders(),
@@ -2061,6 +2279,7 @@ chat_id: currentChatId,
 history: buildHistoryForApi(),
 message: text,
 file: filePayload,
+attached: attachedList,
 web_search: webSearchEnabled,
 system_instruction: systemPrompt === '__NEW__' ? 'You are a helpful assistant.' : systemPrompt
 })
@@ -2105,7 +2324,7 @@ currentHistory.push({ role: 'model', content: fullText });
 isStreaming = false;
 activeAbortController = null;
 updateSendBtnUI(false);
-if (filePayload) refreshDocs();
+if (filePayload || multi.length) refreshDocs();
 }
 }
 function exportChat(format) {
@@ -2479,6 +2698,38 @@ def list_documents(chat_id: str, user: AuthUser = Depends(require_user)):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.post("/api/chats/{chat_id}/documents")
+def upload_document(
+    chat_id: str,
+    body: DocumentUploadRequest,
+    request: Request,
+    user: AuthUser = Depends(require_user),
+):
+    """Index ONE file (a PDF, a text/code file or a .zip). The page calls this once
+    per file when several files are attached together."""
+    client_ip = get_client_ip(request)
+    if not RAG_ENABLED:
+        return JSONResponse({"detail": "Document search is turned off."}, status_code=400)
+    if not check_rate_limit(f"upload:{user.id}", 40):
+        return JSONResponse({"detail": "Too many uploads. Wait a minute."}, status_code=429)
+    file_payload = body.file or {}
+    if "data" not in file_payload or not is_indexable(file_payload):
+        return JSONResponse({"detail": "This file type can't be read."}, status_code=400)
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return JSONResponse({"detail": "GEMINI_API_KEY is not configured."}, status_code=500)
+    try:
+        if not _owns_chat(user, chat_id):
+            return JSONResponse({"detail": "Chat not found."}, status_code=404)
+        result = ingest_document(user, chat_id, file_payload, get_gemini_client(api_key), client_ip)
+        return JSONResponse(result)
+    except ValueError as ex:
+        return JSONResponse({"detail": str(ex)}, status_code=400)
+    except Exception as ex:
+        print("Upload indexing failed:", ex)
+        return JSONResponse({"detail": "Could not index this file."}, status_code=500)
+
+
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: str, user: AuthUser = Depends(require_user)):
     try:
@@ -2813,6 +3064,29 @@ def chat_endpoint(
                 saved_file_payload["doc_id"] = indexed_doc["id"]
             except Exception as ex:
                 print("Indexing failed, sending the file inline instead:", ex)
+                if is_zip_file(file_payload.get("type", ""), file_payload.get("name", "")):
+                    # A zip can't be sent to Gemini as-is: tell the model what happened.
+                    file_payload = None
+                    saved_file_payload = None
+                    system_instruction += (
+                        "\nThe user attached a zip file but it could not be read: "
+                        + str(ex)[:200]
+                        + ". Tell them briefly."
+                    )
+        if body.attached:
+            # Several files were indexed one by one beforehand: keep only labels.
+            saved_file_payload = {
+                "multi": [
+                    {
+                        "name": str(a.get("name", "file"))[:200],
+                        "type": str(a.get("type", ""))[:100],
+                        "size": a.get("size"),
+                        "doc_id": a.get("doc_id"),
+                    }
+                    for a in body.attached[:20]
+                ],
+                "indexed": True,
+            }
         if RAG_ENABLED and chat_id:
             try:
                 doc_ctx = build_doc_context(
