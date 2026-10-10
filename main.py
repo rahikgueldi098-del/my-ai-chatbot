@@ -2139,7 +2139,7 @@ async function loadOAuthButtons() {
   } catch (e) { return; }
   const box = document.getElementById('oauth-box');
   if (!box || !oauthCfg || !oauthCfg.providers || !oauthCfg.providers.length) return;
-  const labels = { google: 'Continue with Google', github: 'Continue with GitHub' };
+  const labels = { google: 'Continue with Google', github: 'Continue with GitHub', apple: 'Continue with Apple' };
   box.innerHTML = '';
   oauthCfg.providers.forEach(p => {
     const b = document.createElement('button');
@@ -4068,7 +4068,7 @@ def _session_payload(res: Any) -> Dict[str, Any]:
 OAUTH_PROVIDERS = [
     p.strip().lower()
     for p in os.environ.get("OAUTH_PROVIDERS", "google,github").split(",")
-    if p.strip() in ("google", "github")
+    if p.strip() in ("google", "github", "apple")
 ]
 
 
