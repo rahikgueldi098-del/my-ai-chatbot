@@ -1179,7 +1179,9 @@ IMAGE_HINT = (
     " lighting, composition) built from their request. The picture is shown to"
     " the user automatically: never write its link or base64, just add one or two"
     " friendly sentences in the user's language. Do NOT use it for charts or"
-    " diagrams (use code, Mermaid or SVG for those)."
+    " diagrams (use code, Mermaid or SVG for those). If `generate_image` returns"
+    " an error, apologize briefly and explain the error in one sentence: NEVER"
+    " replace the picture with SVG, HTML or any code, unless the user asks for code."
 )
 if IMAGE_GEN_ENABLED:
     TOOLS_HINT += IMAGE_HINT
