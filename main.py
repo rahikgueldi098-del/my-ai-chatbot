@@ -146,6 +146,21 @@ class AuthUser:
         self.db.postgrest.auth(token)
 
 
+def _is_session_rejected(e: Exception) -> bool:
+    """True when Supabase says the token itself is bad or expired (the user must log in again).
+    False for temporary problems (network, timeout, Supabase busy): those must NOT log the user out."""
+    name = type(e).__name__
+    if "Retryable" in name:
+        return False
+    status = getattr(e, "status", None)
+    if isinstance(status, int):
+        if status in (400, 401, 403, 422):
+            return True
+        if status == 429 or status >= 500:
+            return False
+    return name.startswith("Auth")
+
+
 def require_user(authorization: Optional[str] = Header(None)) -> AuthUser:
     if not supabase:
         raise HTTPException(
@@ -173,7 +188,9 @@ def require_user(authorization: Optional[str] = Header(None)) -> AuthUser:
         raise
     except Exception as e:
         print(f"Authentication error: {e}")
-        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+        if _is_session_rejected(e):
+            raise HTTPException(status_code=401, detail="Invalid or expired session.")
+        raise HTTPException(status_code=503, detail="Could not check your session right now. Please try again.")
 
     with _auth_lock:
         if len(_auth_cache) > 500:
@@ -1883,6 +1900,10 @@ html.light .canvas-tab.active { background: #1f2328; color: #fff; }
 .kbd { font-family: ui-monospace, Consolas, monospace; background: rgba(128,128,128,0.2); border-radius: 4px; padding: 1px 6px; font-size: 0.8rem; }
 .legal-note { font-size: 0.72rem; color: #777; text-align: center; line-height: 1.4; }
 .legal-note a { color: inherit; text-decoration: underline; cursor: pointer; }
+.remember-row { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: #aaa; cursor: pointer; user-select: none; }
+.remember-row input { width: 16px; height: 16px; accent-color: #22c55e; cursor: pointer; }
+#auth-forgot { color: #38bdf8; text-align: center; text-decoration: none; }
+html.light .remember-row { color: #555; }
 html.light .help-search { background: #fff; color: #1f2328; border-color: #d4d4da; }
 html.light .help-body { color: #555; }
 html.light .help-body a { color: #0369a1; }
@@ -2001,6 +2022,7 @@ html.light .help-body a { color: #0369a1; }
 <div class="modal-title" id="auth-title">🔐 Log in</div>
 <input id="auth-email" class="auth-input" type="email" name="email" placeholder="Email" autocomplete="username">
 <input id="auth-password" class="auth-input" type="password" name="password" placeholder="Password (min 6 characters)" autocomplete="current-password" onkeydown="if(event.key==='Enter') submitAuth()">
+<label id="auth-remember-row" class="remember-row"><input type="checkbox" id="auth-remember" checked> Remember me on this device</label>
 <div id="auth-msg"></div>
 <button id="auth-submit" onclick="submitAuth()">Log in</button>
 <a id="auth-forgot" href="#" onclick="forgotPassword(); return false;" style="font-size:0.8rem;">Forgot password?</a>
@@ -2276,17 +2298,58 @@ breaks: true
 const _origFetch = window.fetch.bind(window);
 let authMode = 'login';
 let _refreshing = null;
-function saveSession(d) {
+// "Remember me" ON  -> the login is kept in localStorage (stays after closing the browser).
+// "Remember me" OFF -> kept in sessionStorage (survives a page refresh, forgotten when the tab/browser closes).
+function rememberOn() {
   try {
-    localStorage.setItem('supabase_token', d.access_token || '');
-    if (d.refresh_token) localStorage.setItem('supabase_refresh', d.refresh_token);
-    if (d.email) localStorage.setItem('supabase_email', d.email);
+    const f = localStorage.getItem('nova_remember');
+    if (f === '1') return true;
+    if (f === '0') return false;
+    return !!localStorage.getItem('supabase_token');
+  } catch (e) { return false; }
+}
+function authSet(k, v) {
+  try {
+    const keep = rememberOn() ? localStorage : sessionStorage;
+    const other = keep === localStorage ? sessionStorage : localStorage;
+    keep.setItem(k, v);
+    other.removeItem(k);
   } catch (e) {}
+}
+function authGet(k) {
+  try { return sessionStorage.getItem(k) || localStorage.getItem(k) || ''; } catch (e) { return ''; }
+}
+function authDel(k) {
+  try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch (e) {}
+}
+function applyRememberChoice() {
+  const cb = document.getElementById('auth-remember');
+  const on = !cb || cb.checked;
+  try {
+    localStorage.setItem('nova_remember', on ? '1' : '0');
+    const em = (document.getElementById('auth-email').value || '').trim();
+    if (on && em) localStorage.setItem('nova_saved_email', em);
+    if (!on) localStorage.removeItem('nova_saved_email');
+  } catch (e) {}
+}
+function initRemember() {
+  try {
+    const cb = document.getElementById('auth-remember');
+    if (cb) cb.checked = localStorage.getItem('nova_remember') !== '0';
+    const saved = localStorage.getItem('nova_saved_email');
+    const em = document.getElementById('auth-email');
+    if (saved && em && !em.value) em.value = saved;
+  } catch (e) {}
+}
+function saveSession(d) {
+  authSet('supabase_token', d.access_token || '');
+  if (d.refresh_token) authSet('supabase_refresh', d.refresh_token);
+  if (d.email) authSet('supabase_email', d.email);
   updateUserBox();
 }
 function updateUserBox() {
   const el = document.getElementById('user-email');
-  if (el) el.textContent = localStorage.getItem('supabase_email') || '';
+  if (el) el.textContent = authGet('supabase_email');
 }
 function showAuth(msg) {
   const m = document.getElementById('auth-modal');
@@ -2317,6 +2380,8 @@ function setAuthMode(mode) {
   document.getElementById('auth-password').autocomplete = login ? 'current-password' : 'new-password';
   const ob = document.getElementById('oauth-box');
   if (ob) ob.style.visibility = reset ? 'hidden' : '';
+  const rr = document.getElementById('auth-remember-row');
+  if (rr) rr.style.display = reset ? 'none' : '';
 }
 async function forgotPassword() {
   const email = document.getElementById('auth-email').value.trim();
@@ -2384,6 +2449,7 @@ async function submitAuth() {
       setAuthMsg('Account created. Check your email to confirm it, then log in.', 'ok');
       return;
     }
+    applyRememberChoice();
     saveSession(d);
     document.getElementById('auth-password').value = '';
     setAuthMsg('', '');
@@ -2421,6 +2487,7 @@ async function loadOAuthButtons() {
 }
 function startOAuth(provider) {
   if (!oauthCfg || !oauthCfg.authorize_url) return;
+  applyRememberChoice();
   const redirect = encodeURIComponent(window.location.origin + '/');
   window.location.href = oauthCfg.authorize_url + '?provider=' + encodeURIComponent(provider) + '&redirect_to=' + redirect;
 }
@@ -2443,7 +2510,7 @@ async function uploadBigFile(f, chatId, signal, setHint) {
   if (!cfg || !cfg.anon_key) return fail('Storage upload is not available.');
   const safe = f.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100) || 'file';
   const send = async () => {
-    const token = localStorage.getItem('supabase_token') || '';
+    const token = authGet('supabase_token');
     const uid = jwtSub(token);
     const path = `${uid}/uploads/${Date.now()}-${safe}`;
     const r = await _origFetch(`${cfg.supabase_url}/storage/v1/object/${cfg.bucket}/${path}`, {
@@ -2500,28 +2567,28 @@ function handleOAuthRedirect() {
   }
 }
 function logout() {
-  try {
-    localStorage.removeItem('supabase_token');
-    localStorage.removeItem('supabase_refresh');
-    localStorage.removeItem('supabase_email');
-  } catch (e) {}
+  authDel('supabase_token');
+  authDel('supabase_refresh');
+  authDel('supabase_email');
   location.reload();
 }
+let _refreshTemporaryFail = false;
 async function tryRefresh() {
-  const rt = localStorage.getItem('supabase_refresh');
+  const rt = authGet('supabase_refresh');
   if (!rt) return false;
   if (!_refreshing) {
     _refreshing = (async () => {
+      _refreshTemporaryFail = false;
       try {
         const r = await _origFetch('/api/auth/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ refresh_token: rt })
         });
-        if (!r.ok) return false;
+        if (!r.ok) { _refreshTemporaryFail = r.status >= 500; return false; }
         saveSession(await r.json());
         return true;
-      } catch (e) { return false; }
+      } catch (e) { _refreshTemporaryFail = true; return false; }
       finally { setTimeout(() => { _refreshing = null; }, 0); }
     })();
   }
@@ -2536,27 +2603,31 @@ window.fetch = async function(url, opts) {
   if (res.status === 401 && u.startsWith('/api/') && !u.startsWith('/api/auth/')) {
     if (await tryRefresh()) {
       opts = Object.assign({}, opts, {
-        headers: Object.assign({}, opts.headers, { 'Authorization': 'Bearer ' + localStorage.getItem('supabase_token') })
+        headers: Object.assign({}, opts.headers, { 'Authorization': 'Bearer ' + authGet('supabase_token') })
       });
       res = await _origFetch(url, opts);
     }
-    if (res.status === 401) showAuth('Please log in to continue.');
+    if (res.status === 401 && !_refreshTemporaryFail) showAuth('Please log in to continue.');
   }
   return res;
 };
 function getAuthHeaders() {
 const headers = { 'Content-Type': 'application/json' };
-const token = localStorage.getItem('supabase_token');
+const token = authGet('supabase_token');
 if (token) {
 headers['Authorization'] = `Bearer ${token}`;
 }
 return headers;
 }
 async function initStorage() {
-if (!localStorage.getItem('supabase_token')) { showAuth(); return; }
+if (!authGet('supabase_token')) { showAuth(); return; }
 checkAdmin();
 try {
-const res = await fetch('/api/chats', { headers: getAuthHeaders() });
+let res = await fetch('/api/chats', { headers: getAuthHeaders() });
+for (let i = 0; i < 2 && res.status === 503; i++) {
+await new Promise(function (r) { setTimeout(r, 1200); });
+res = await fetch('/api/chats', { headers: getAuthHeaders() });
+}
 if (res.status === 401) return;
 if (res.ok) {
 chats = await res.json();
@@ -4388,7 +4459,7 @@ let v = 'Puck';
 try { v = localStorage.getItem('live_voice') || 'Puck'; } catch (e) {}
 document.getElementById('set-voice').value = v;
 let em = '';
-try { em = localStorage.getItem('supabase_email') || ''; } catch (e) {}
+try { em = authGet('supabase_email'); } catch (e) {}
 document.getElementById('set-email').textContent = em || '-';
 const cps = getCustomPersonas();
 const wrap = document.getElementById('set-custom-wrap');
@@ -4499,7 +4570,7 @@ if (m) m.classList.remove('open');
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeHelpModal(); });
 // ===================== END OF HELP & ABOUT =====================
 // ===================== END OF SETTINGS =====================
-window.addEventListener('DOMContentLoaded', () => { initSettings(); handleOAuthRedirect(); updateUserBox(); loadOAuthButtons(); initStorage(); });
+window.addEventListener('DOMContentLoaded', () => { initSettings(); initRemember(); handleOAuthRedirect(); updateUserBox(); loadOAuthButtons(); initStorage(); });
 </script>
 </body>
 </html>"""
@@ -4753,7 +4824,10 @@ def auth_refresh(body: RefreshRequest):
         res = _auth_client().auth.refresh_session(body.refresh_token)
         return JSONResponse(_session_payload(res))
     except Exception as e:
-        return JSONResponse({"detail": str(e)}, status_code=401)
+        if _is_session_rejected(e):
+            return JSONResponse({"detail": str(e)}, status_code=401)
+        print("Session refresh failed (temporary):", e)
+        return JSONResponse({"detail": "Temporary problem, please try again."}, status_code=503)
 
 
 # --- Chat routes (login required, filtered per user) ---
