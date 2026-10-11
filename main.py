@@ -1871,6 +1871,21 @@ html.light .canvas-head { border-bottom-color: #e3e3e8; }
 html.light .canvas-tabs { border-color: #d4d4da; }
 html.light .canvas-tab { background: #ececf0; color: #555; }
 html.light .canvas-tab.active { background: #1f2328; color: #fff; }
+/* ===== Help & legal ===== */
+.help-search { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid #424242; background: #2f2f2f; color: #fff; font-size: 0.9rem; outline: none; }
+.help-item { border: 1px solid rgba(128,128,128,0.25); border-radius: 8px; padding: 0 12px; }
+.help-item summary { cursor: pointer; padding: 10px 0; font-weight: 600; font-size: 0.92rem; }
+.help-body { padding: 0 0 12px; font-size: 0.85rem; line-height: 1.55; color: #aaa; }
+.help-body ul { margin: 6px 0 0 18px; }
+.help-body li { margin-bottom: 3px; }
+.help-body a { color: #38bdf8; }
+.help-empty { display: none; text-align: center; color: #888; font-size: 0.85rem; padding: 14px 0; }
+.kbd { font-family: ui-monospace, Consolas, monospace; background: rgba(128,128,128,0.2); border-radius: 4px; padding: 1px 6px; font-size: 0.8rem; }
+.legal-note { font-size: 0.72rem; color: #777; text-align: center; line-height: 1.4; }
+.legal-note a { color: inherit; text-decoration: underline; cursor: pointer; }
+html.light .help-search { background: #fff; color: #1f2328; border-color: #d4d4da; }
+html.light .help-body { color: #555; }
+html.light .help-body a { color: #0369a1; }
 </style>
 </head>
 <body>
@@ -1882,6 +1897,7 @@ html.light .canvas-tab.active { background: #1f2328; color: #fff; }
 <div class="export-box">
 <span class="export-title" id="user-email"></span>
 <button class="export-btn" onclick="logout()">Log out</button>
+<button class="export-btn" onclick="openHelpModal()">❓ Help &amp; About</button>
 </div>
 <div class="export-box">
 <span class="export-title">Export Chat</span>
@@ -1936,6 +1952,7 @@ html.light .canvas-tab.active { background: #1f2328; color: #fff; }
 <textarea id="user-input" placeholder="Ask AI Assistant... (Shift + Enter for new line)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
 <button id="send-btn" onclick="handleSendOrStop()">Send</button>
 </div>
+<div class="legal-note">AI can make mistakes, so double-check important information. <a href="#" onclick="openHelpModal(); return false;">Help</a> &middot; <a href="/privacy" target="_blank">Privacy</a> &middot; <a href="/terms" target="_blank">Terms</a></div>
 </div>
 </div>
 <div id="canvas-panel">
@@ -1988,7 +2005,99 @@ html.light .canvas-tab.active { background: #1f2328; color: #fff; }
 <button id="auth-submit" onclick="submitAuth()">Log in</button>
 <a id="auth-forgot" href="#" onclick="forgotPassword(); return false;" style="font-size:0.8rem;">Forgot password?</a>
 <a id="auth-switch" href="#" onclick="toggleAuthMode(); return false;">No account? Sign up</a>
+<div style="font-size:0.75rem;color:#888;text-align:center;">By continuing you agree to the <a href="/terms" target="_blank" style="color:#38bdf8;">Terms</a> and <a href="/privacy" target="_blank" style="color:#38bdf8;">Privacy Policy</a>.</div>
 <div id="oauth-box" style="display:none;margin-top:14px;border-top:1px solid #333;padding-top:14px;flex-direction:column;gap:8px;"></div>
+</div>
+</div>
+<div id="help-modal" class="modal-overlay" onclick="if(event.target===this) closeHelpModal()">
+<div class="modal-content" style="max-width:600px;">
+<div class="modal-header">
+<div class="modal-title">❓ Help &amp; About</div>
+<button class="close-btn" onclick="closeHelpModal()" aria-label="Close help">✕</button>
+</div>
+<input id="help-search" class="help-search" type="text" placeholder="Search help..." autocomplete="off" oninput="filterHelp(this.value)">
+
+<details class="help-item"><summary>What can NOVA AI do?</summary><div class="help-body">
+It is an AI assistant you can chat with. It can answer questions, write and explain code, summarize or search your documents, analyze data, draw charts, translate, brainstorm, and talk with you by voice.
+</div></details>
+
+<details class="help-item"><summary>How do I attach files or pictures?</summary><div class="help-body">
+Click 📎 next to the message box.
+<ul>
+<li>Pictures: up to 6 per message.</li>
+<li>Documents: PDF, text, code, Word, PowerPoint, Excel/CSV, and .zip folders. You can pick up to 20 files at once, and large files up to 50 MB.</li>
+<li>Documents are indexed, so the AI can search them in every message of that chat. See or remove them with 📚 Documents.</li>
+</ul>
+</div></details>
+
+<details class="help-item"><summary>What do Web Search and Run Code do?</summary><div class="help-body">
+<ul>
+<li><b>Web Search:</b> the AI looks things up online, good for recent news and facts.</li>
+<li><b>Run Code:</b> the AI writes and runs Python to calculate, draw charts, and analyze attached CSV, Excel or JSON files.</li>
+<li>Only one of them can be on at a time. You can choose a default in ⚙️ Settings.</li>
+</ul>
+</div></details>
+
+<details class="help-item"><summary>What are personas?</summary><div class="help-body">
+A persona sets how the AI behaves (for example Senior Engineer or Ultra-Concise). Pick one in the dropdown at the top. Choose "Add Custom Persona..." to write your own. Custom personas are saved on this device, and you can delete them in ⚙️ Settings.
+</div></details>
+
+<details class="help-item"><summary>How do the microphone buttons work?</summary><div class="help-body">
+<ul>
+<li>🎤 Dictation: turns what you say into text in the message box.</li>
+<li>🎧 Live voice: a real-time spoken conversation. You can interrupt any time. Use headphones so the AI doesn't hear itself.</li>
+<li>If it says the microphone is blocked, allow microphone access for this site in your browser settings.</li>
+</ul>
+</div></details>
+
+<details class="help-item"><summary>What does the magic wand 🪄 do?</summary><div class="help-body">
+It rewrites your draft message into a clearer, more detailed prompt. Read the result before you send it.
+</div></details>
+
+<details class="help-item"><summary>What is the preview panel?</summary><div class="help-body">
+When the AI writes a web page, an app, or a diagram, it opens in a live preview beside the chat. Use the Preview and Code tabs, copy or download it, go full screen, or press "Fix with AI" if something is broken.
+</div></details>
+
+<details class="help-item"><summary>How do I export or delete my chats?</summary><div class="help-body">
+<ul>
+<li>Export the current chat as Markdown or JSON from the left menu.</li>
+<li>Rename ✏️ or delete 🗑️ a chat from the chat list.</li>
+<li>To remove everything at once, use ⚙️ Settings, then Delete all chats.</li>
+</ul>
+</div></details>
+
+<details class="help-item"><summary>Why did I get an error or hit a limit?</summary><div class="help-body">
+<ul>
+<li>To keep the service fair there are per-minute and daily message limits. Wait a little and try again.</li>
+<li>If an answer fails, press Send again or start a new chat.</li>
+<li>If you are asked to log in again, your session expired. Log in and continue.</li>
+<li>A file that won't index may be too big, empty, or an unsupported type.</li>
+</ul>
+</div></details>
+
+<details class="help-item"><summary>Keyboard shortcuts</summary><div class="help-body">
+<ul>
+<li id="help-enter-key"></li>
+<li><span class="kbd">Esc</span> closes a window, or ends a live voice call.</li>
+</ul>
+</div></details>
+
+<details class="help-item"><summary>Is my data safe? Who sees it?</summary><div class="help-body">
+Your chats and files are stored in your account and only you can open them. Your messages and attached files are sent to Google's Gemini AI to produce answers. We don't sell your data. Read the full <a href="/privacy" target="_blank">Privacy Policy</a>.
+</div></details>
+
+<details class="help-item"><summary>Can I trust the answers?</summary><div class="help-body">
+AI can be wrong or out of date. Check important information yourself, and don't rely on it alone for medical, legal or financial decisions.
+</div></details>
+
+<div id="help-empty" class="help-empty">No help topics match your search.</div>
+
+<div class="set-section">About</div>
+<div style="font-size:0.85rem;line-height:1.6;">
+<b>NOVA AI</b> is an AI chat assistant powered by Google Gemini.<br>
+Need help or want your account deleted? Email <a href="mailto:__LEGAL_CONTACT__" style="color:#38bdf8;">__LEGAL_CONTACT__</a>.<br>
+<a href="/privacy" target="_blank" style="color:#38bdf8;">Privacy Policy</a> &middot; <a href="/terms" target="_blank" style="color:#38bdf8;">Terms of Service</a>
+</div>
 </div>
 </div>
 <div id="settings-modal" class="modal-overlay" onclick="if(event.target===this) closeSettingsModal()">
@@ -2065,7 +2174,7 @@ html.light .canvas-tab.active { background: #1f2328; color: #fff; }
 <button class="set-btn" onclick="resetSettings()">Reset</button>
 </div>
 <div style="font-size:0.78rem;color:#888;text-align:center;padding-top:4px;">
-<a href="/privacy" target="_blank" style="color:#38bdf8;">Privacy</a> &middot; <a href="/terms" target="_blank" style="color:#38bdf8;">Terms</a>
+<a href="#" onclick="closeSettingsModal(); openHelpModal(); return false;" style="color:#38bdf8;">Help &amp; About</a> &middot; <a href="/privacy" target="_blank" style="color:#38bdf8;">Privacy</a> &middot; <a href="/terms" target="_blank" style="color:#38bdf8;">Terms</a>
 </div>
 </div>
 </div>
@@ -4359,6 +4468,36 @@ if (mq.addEventListener) mq.addEventListener('change', onChange);
 } catch (e) {}
 }
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSettingsModal(); });
+// ===================== HELP & ABOUT =====================
+function filterHelp(q) {
+q = (q || '').trim().toLowerCase();
+let shown = 0;
+document.querySelectorAll('#help-modal .help-item').forEach(function (d) {
+const hit = !q || d.textContent.toLowerCase().indexOf(q) !== -1;
+d.style.display = hit ? '' : 'none';
+d.open = !!q && hit;
+if (hit) shown++;
+});
+document.getElementById('help-empty').style.display = shown ? 'none' : 'block';
+}
+function openHelpModal() {
+const k = document.getElementById('help-enter-key');
+if (k) k.innerHTML = (typeof appSettings !== 'undefined' && appSettings.enterToSend === false)
+? '<span class="kbd">Ctrl/⌘ + Enter</span> sends, <span class="kbd">Enter</span> adds a new line.'
+: '<span class="kbd">Enter</span> sends, <span class="kbd">Shift + Enter</span> adds a new line.';
+const s = document.getElementById('help-search');
+s.value = '';
+filterHelp('');
+document.getElementById('help-modal').classList.add('open');
+closeSidebarOnMobile();
+if (window.innerWidth > 768) setTimeout(function () { s.focus(); }, 50);
+}
+function closeHelpModal() {
+const m = document.getElementById('help-modal');
+if (m) m.classList.remove('open');
+}
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeHelpModal(); });
+// ===================== END OF HELP & ABOUT =====================
 // ===================== END OF SETTINGS =====================
 window.addEventListener('DOMContentLoaded', () => { initSettings(); handleOAuthRedirect(); updateUserBox(); loadOAuthButtons(); initStorage(); });
 </script>
@@ -4368,7 +4507,8 @@ window.addEventListener('DOMContentLoaded', () => { initSettings(); handleOAuthR
 
 @app.get("/", response_class=HTMLResponse)
 def serve_gui():
-    return HTML_CONTENT
+    safe = str(LEGAL_CONTACT).replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
+    return HTML_CONTENT.replace("__LEGAL_CONTACT__", safe)
 
 
 # --- Legal pages (Google login asks for a privacy policy and terms link) ---
