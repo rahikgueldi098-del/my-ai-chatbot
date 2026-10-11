@@ -1620,6 +1620,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NOVA AI</title>
+<script>(function(){try{var s=JSON.parse(localStorage.getItem('nova_settings')||'{}');var t=s.theme||'dark';var light=t==='light'||(t==='system'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches);if(light)document.documentElement.classList.add('light');var m={small:'14px',medium:'16px',large:'18px'};if(m[s.fontSize])document.documentElement.style.fontSize=m[s.fontSize];}catch(e){}})();</script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -1792,6 +1793,84 @@ header { padding: 10px; flex-wrap: wrap; }
 .live-ctl.end:hover { background: #dc2626; }
 .live-note { font-size: 0.75rem; color: #666; max-width: 420px; }
 #live-btn.recording { background: #1b3a2b; border-color: #22c55e; color: #4ade80; }
+/* ===== Settings panel ===== */
+.set-section { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; margin-top: 6px; }
+.set-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid rgba(128,128,128,0.18); flex-wrap: wrap; }
+.set-row:last-of-type { border-bottom: none; }
+.set-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.set-name { font-size: 0.92rem; font-weight: 600; }
+.set-desc { font-size: 0.78rem; color: #888; }
+.seg { display: flex; border: 1px solid #424242; border-radius: 8px; overflow: hidden; flex-shrink: 0; }
+.seg button { background: #2f2f2f; color: #aaa; border: none; padding: 6px 12px; font-size: 0.82rem; cursor: pointer; }
+.seg button.on { background: #fff; color: #000; font-weight: 600; }
+.set-select { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 6px; padding: 6px 10px; font-size: 0.85rem; max-width: 210px; outline: none; cursor: pointer; }
+.switch { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; background: #424242; border-radius: 24px; cursor: pointer; transition: 0.2s; }
+.switch span:before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: 0.2s; }
+.switch input:checked + span { background: #22c55e; }
+.switch input:checked + span:before { transform: translateX(18px); }
+.set-btn { background: #2f2f2f; color: #ddd; border: 1px solid #424242; border-radius: 6px; padding: 6px 12px; font-size: 0.82rem; cursor: pointer; white-space: nowrap; }
+.set-btn:hover { background: #383838; color: #fff; }
+.set-btn.danger { color: #f87171; }
+.set-btn.danger:hover { background: #450a0a; border-color: #991b1b; }
+.custom-persona-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; font-size: 0.85rem; }
+.custom-persona-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* ===== Light theme (applied with class "light" on <html>) ===== */
+html.light { color-scheme: light; }
+html.light body { background-color: #ffffff; color: #1f2328; }
+html.light #sidebar { background-color: #f4f4f6; border-right-color: #e3e3e8; }
+html.light header { background: #f4f4f6; border-bottom-color: #e3e3e8; }
+html.light #new-chat-btn, html.light .export-btn, html.light #menu-btn, html.light #persona-select,
+html.light .toggle-btn, html.light .icon-btn, html.light #user-input, html.light .auth-input,
+html.light .set-select, html.light .set-btn, html.light #canvas-select, html.light .canvas-btn,
+html.light #analytics-hours { background: #ececf0 !important; color: #1f2328; border-color: #d4d4da !important; }
+html.light .toggle-btn { color: #6b7280; }
+html.light .toggle-btn.active { background: #dcfce7 !important; color: #15803d; border-color: #22c55e !important; }
+html.light .icon-btn.recording { background: #fee2e2 !important; color: #dc2626; border-color: #ef4444 !important; }
+html.light #new-chat-btn:hover, html.light .export-btn:hover, html.light .icon-btn:hover,
+html.light .set-btn:hover, html.light .canvas-btn:hover { background: #e0e0e6 !important; color: #111; }
+html.light .set-btn.danger { color: #dc2626; }
+html.light #send-btn, html.light #auth-submit { background: #1f2328; color: #fff; }
+html.light #send-btn.stop-btn { background: #ef4444; color: #fff; }
+html.light #chat-search, html.light .rename-input { background: #fff; color: #1f2328; border-color: #d4d4da; }
+html.light .history-item { color: #555; }
+html.light .history-item:hover { background: #e9e9ee; color: #111; }
+html.light .history-item.active { background: #fff; color: #111; }
+html.light .item-action-btn:hover, html.light .close-btn:hover { color: #111; }
+html.light .export-box { border-top-color: #e3e3e8; }
+html.light .user { background: #ececf0; color: #1f2328; }
+html.light .model { background: #fff; color: #1f2328; border-color: #e3e3e8; }
+html.light .message :not(pre) > code { background: #eceef2; color: #1f2328; }
+html.light .message pre { background: #0d1117; color: #e6edf3; }
+html.light .msg-actions { border-top-color: #e9e9ee; }
+html.light .action-btn:hover { background: #ececf0; color: #111; }
+html.light .chip { background: #f0f0f4; border-color: #dcdce2; color: #444; }
+html.light .chip:hover { background: #e4e4ea; color: #111; border-color: #c8c8d0; }
+html.light #file-preview { background: #ececf0; border-color: #d4d4da; }
+html.light .error-box { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
+html.light .doc-badge { background: #e0f2fe; border-color: #bae6fd; color: #0369a1; }
+html.light .doc-badge:hover { background: #bae6fd; }
+html.light .admin-btn { background: #e0f2fe; color: #0369a1; border-color: #bae6fd; }
+html.light .admin-btn:hover { background: #bae6fd; color: #0c4a6e; }
+html.light .modal-content { background: #fff; color: #1f2328; border-color: #e3e3e8; }
+html.light .modal-header { border-bottom-color: #e3e3e8; }
+html.light .modal-title { color: #0284c7; }
+html.light .stat-card, html.light .log-table-container, html.light .doc-row { background: #f7f7f9; border-color: #e3e3e8; }
+html.light .log-table th { background: #efeff3; color: #555; }
+html.light .log-table th, html.light .log-table td { border-bottom-color: #e9e9ee; }
+html.light .doc-del { border-color: #d4d4da; color: #dc2626; }
+html.light .doc-del:hover { background: #fef2f2; border-color: #fecaca; }
+html.light #oauth-box { border-top-color: #e3e3e8 !important; }
+html.light .seg { border-color: #d4d4da; }
+html.light .seg button { background: #ececf0; color: #555; }
+html.light .seg button.on { background: #1f2328; color: #fff; }
+html.light .switch span { background: #c8c8d0; }
+html.light #canvas-panel { background: #f4f4f6; border-left-color: #e3e3e8; }
+html.light .canvas-head { border-bottom-color: #e3e3e8; }
+html.light .canvas-tabs { border-color: #d4d4da; }
+html.light .canvas-tab { background: #ececf0; color: #555; }
+html.light .canvas-tab.active { background: #1f2328; color: #fff; }
 </style>
 </head>
 <body>
@@ -1830,6 +1909,7 @@ header { padding: 10px; flex-wrap: wrap; }
 <option value="You are a creative writer and storytelling assistant with a rich, expressive vocabulary.">Creative Writer</option>
 <option value="__NEW__">➕ Add Custom Persona...</option>
 </select>
+<button id="settings-btn" class="toggle-btn" onclick="openSettingsModal()" title="Settings" aria-label="Settings">⚙️</button>
 </div>
 </header>
 <div id="chat-box"></div>
@@ -1909,6 +1989,84 @@ header { padding: 10px; flex-wrap: wrap; }
 <a id="auth-forgot" href="#" onclick="forgotPassword(); return false;" style="font-size:0.8rem;">Forgot password?</a>
 <a id="auth-switch" href="#" onclick="toggleAuthMode(); return false;">No account? Sign up</a>
 <div id="oauth-box" style="display:none;margin-top:14px;border-top:1px solid #333;padding-top:14px;flex-direction:column;gap:8px;"></div>
+</div>
+</div>
+<div id="settings-modal" class="modal-overlay" onclick="if(event.target===this) closeSettingsModal()">
+<div class="modal-content" style="max-width:540px;">
+<div class="modal-header">
+<div class="modal-title">⚙️ Settings</div>
+<button class="close-btn" onclick="closeSettingsModal()" aria-label="Close settings">✕</button>
+</div>
+
+<div class="set-section">Appearance</div>
+<div class="set-row">
+<div class="set-text"><span class="set-name">Theme</span><span class="set-desc">Dark, light, or follow your device.</span></div>
+<div class="seg" id="seg-theme">
+<button data-v="dark" onclick="setSetting('theme','dark')">Dark</button>
+<button data-v="light" onclick="setSetting('theme','light')">Light</button>
+<button data-v="system" onclick="setSetting('theme','system')">Auto</button>
+</div>
+</div>
+<div class="set-row">
+<div class="set-text"><span class="set-name">Text size</span><span class="set-desc">Makes messages and menus bigger or smaller.</span></div>
+<div class="seg" id="seg-font">
+<button data-v="small" onclick="setSetting('fontSize','small')">Small</button>
+<button data-v="medium" onclick="setSetting('fontSize','medium')">Medium</button>
+<button data-v="large" onclick="setSetting('fontSize','large')">Large</button>
+</div>
+</div>
+
+<div class="set-section">Chat</div>
+<div class="set-row">
+<div class="set-text"><span class="set-name">Default persona</span><span class="set-desc">Used every time you open the app.</span></div>
+<select id="set-persona" class="set-select" onchange="setSetting('persona', this.value)"></select>
+</div>
+<div class="set-row">
+<div class="set-text"><span class="set-name">Default tool</span><span class="set-desc">Web Search and Run Code can't be used together.</span></div>
+<div class="seg" id="seg-tool">
+<button data-v="none" onclick="setSetting('tool','none')">None</button>
+<button data-v="search" onclick="setSetting('tool','search')">Search</button>
+<button data-v="code" onclick="setSetting('tool','code')">Code</button>
+</div>
+</div>
+<div class="set-row">
+<div class="set-text"><span class="set-name">Press Enter to send</span><span class="set-desc">Off: Enter adds a new line, Ctrl/⌘ + Enter sends.</span></div>
+<label class="switch"><input type="checkbox" id="set-enter" onchange="setSetting('enterToSend', this.checked)"><span></span></label>
+</div>
+<div id="set-custom-wrap" style="display:none;">
+<div class="set-name" style="margin:6px 0 2px;">Your custom personas</div>
+<div id="set-custom-list"></div>
+</div>
+
+<div class="set-section">Voice</div>
+<div class="set-row">
+<div class="set-text"><span class="set-name">Live voice</span><span class="set-desc">The voice used in live conversations.</span></div>
+<select id="set-voice" class="set-select" onchange="setLiveVoiceSetting(this.value)">
+<option value="Puck">Puck</option>
+<option value="Charon">Charon</option>
+<option value="Kore">Kore</option>
+<option value="Fenrir">Fenrir</option>
+<option value="Aoede">Aoede</option>
+<option value="Zephyr">Zephyr</option>
+</select>
+</div>
+
+<div class="set-section">Account &amp; data</div>
+<div class="set-row">
+<div class="set-text"><span class="set-name">Signed in as</span><span class="set-desc" id="set-email" style="word-break:break-all;"></span></div>
+<button class="set-btn" onclick="logout()">Log out</button>
+</div>
+<div class="set-row">
+<div class="set-text"><span class="set-name">Delete all chats</span><span class="set-desc">Removes every conversation and its files. This cannot be undone.</span></div>
+<button class="set-btn danger" onclick="deleteAllChats()">Delete all</button>
+</div>
+<div class="set-row">
+<div class="set-text"><span class="set-name">Reset settings</span><span class="set-desc">Back to the default look and behavior.</span></div>
+<button class="set-btn" onclick="resetSettings()">Reset</button>
+</div>
+<div style="font-size:0.78rem;color:#888;text-align:center;padding-top:4px;">
+<a href="/privacy" target="_blank" style="color:#38bdf8;">Privacy</a> &middot; <a href="/terms" target="_blank" style="color:#38bdf8;">Terms</a>
+</div>
 </div>
 </div>
 <div id="docs-modal" class="modal-overlay" onclick="if(event.target===this) closeDocsModal()">
@@ -3104,6 +3262,7 @@ opt.value = promptText;
 opt.innerText = name;
 select.insertBefore(opt, select.lastElementChild);
 select.value = promptText;
+try { const cp = getCustomPersonas(); cp.push({ name: name, prompt: promptText }); setCustomPersonas(cp); } catch (e) {}
 }
 }
 function autoExpand(textarea) {
@@ -3111,7 +3270,11 @@ textarea.style.height = 'auto';
 textarea.style.height = Math.min(textarea.scrollHeight, 150) + 'px';
 }
 function handleKeyDown(event) {
-if (event.key === 'Enter' && !event.shiftKey) {
+if (event.key !== 'Enter' || event.isComposing) return;
+const send = (typeof appSettings !== 'undefined' && appSettings.enterToSend === false)
+? (event.ctrlKey || event.metaKey)
+: !event.shiftKey;
+if (send) {
 event.preventDefault();
 handleSendOrStop();
 }
@@ -4038,7 +4201,166 @@ body: JSON.stringify({ chat_id: chatId, turns: [], usage: usage, duration_sec: s
 window.addEventListener('beforeunload', () => { if (LIVE.active) endLiveVoice(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && LIVE.active) endLiveVoice(); });
 // ===================== END OF PILLAR 5 (browser side) =====================
-window.addEventListener('DOMContentLoaded', () => { handleOAuthRedirect(); updateUserBox(); loadOAuthButtons(); initStorage(); });
+// ===================== SETTINGS (theme, text size, defaults) =====================
+const SETTINGS_KEY = 'nova_settings';
+const SETTINGS_DEFAULTS = { theme: 'dark', fontSize: 'medium', persona: '', tool: 'none', enterToSend: true };
+let appSettings = Object.assign({}, SETTINGS_DEFAULTS);
+function loadSettings() {
+try { appSettings = Object.assign({}, SETTINGS_DEFAULTS, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); }
+catch (e) { appSettings = Object.assign({}, SETTINGS_DEFAULTS); }
+}
+function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(appSettings)); } catch (e) {} }
+function getCustomPersonas() { try { const a = JSON.parse(localStorage.getItem('nova_custom_personas') || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+function setCustomPersonas(a) { try { localStorage.setItem('nova_custom_personas', JSON.stringify(a)); } catch (e) {} }
+function addPersonaOption(name, text) {
+const sel = document.getElementById('persona-select');
+const opt = document.createElement('option');
+opt.value = text;
+opt.textContent = name;
+sel.insertBefore(opt, sel.lastElementChild);
+}
+function applyTheme() {
+const t = appSettings.theme;
+const light = t === 'light' || (t === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
+document.documentElement.classList.toggle('light', light);
+}
+function applyFontSize() {
+const m = { small: '14px', medium: '16px', large: '18px' };
+document.documentElement.style.fontSize = m[appSettings.fontSize] || '16px';
+}
+function applyDefaultTool() {
+webSearchEnabled = appSettings.tool === 'search';
+codeEnabled = appSettings.tool === 'code';
+syncToggleButtons();
+}
+function applyEnterHint() {
+const ta = document.getElementById('user-input');
+if (ta) ta.placeholder = appSettings.enterToSend === false
+? 'Ask AI Assistant... (Ctrl + Enter to send)'
+: 'Ask AI Assistant... (Shift + Enter for new line)';
+}
+function applyDefaultPersona() {
+const sel = document.getElementById('persona-select');
+if (appSettings.persona && Array.from(sel.options).some(o => o.value === appSettings.persona && o.value !== '__NEW__')) sel.value = appSettings.persona;
+}
+function setSetting(key, val) {
+appSettings[key] = val;
+saveSettings();
+if (key === 'theme') applyTheme();
+if (key === 'fontSize') applyFontSize();
+if (key === 'persona') applyDefaultPersona();
+if (key === 'tool') applyDefaultTool();
+if (key === 'enterToSend') applyEnterHint();
+renderSettingsUI();
+}
+function setLiveVoiceSetting(v) {
+try { localStorage.setItem('live_voice', v); } catch (e) {}
+const lv = document.getElementById('live-voice');
+if (lv) lv.value = v;
+}
+function renderSettingsUI() {
+[['seg-theme', 'theme'], ['seg-font', 'fontSize'], ['seg-tool', 'tool']].forEach(function (p) {
+document.querySelectorAll('#' + p[0] + ' button').forEach(function (b) { b.classList.toggle('on', b.dataset.v === appSettings[p[1]]); });
+});
+const src = document.getElementById('persona-select');
+const dst = document.getElementById('set-persona');
+dst.innerHTML = '';
+Array.from(src.options).forEach(function (o) {
+if (o.value === '__NEW__') return;
+const n = document.createElement('option');
+n.value = o.value;
+n.textContent = o.textContent;
+dst.appendChild(n);
+});
+if (appSettings.persona && Array.from(dst.options).some(o => o.value === appSettings.persona)) dst.value = appSettings.persona;
+else dst.selectedIndex = 0;
+document.getElementById('set-enter').checked = appSettings.enterToSend !== false;
+let v = 'Puck';
+try { v = localStorage.getItem('live_voice') || 'Puck'; } catch (e) {}
+document.getElementById('set-voice').value = v;
+let em = '';
+try { em = localStorage.getItem('supabase_email') || ''; } catch (e) {}
+document.getElementById('set-email').textContent = em || '-';
+const cps = getCustomPersonas();
+const wrap = document.getElementById('set-custom-wrap');
+const list = document.getElementById('set-custom-list');
+wrap.style.display = cps.length ? 'block' : 'none';
+list.innerHTML = '';
+cps.forEach(function (cp, i) {
+const row = document.createElement('div');
+row.className = 'custom-persona-row';
+const nm = document.createElement('span');
+nm.textContent = cp.name;
+const del = document.createElement('button');
+del.className = 'set-btn danger';
+del.textContent = 'Delete';
+del.onclick = function () { deleteCustomPersona(i); };
+row.appendChild(nm);
+row.appendChild(del);
+list.appendChild(row);
+});
+}
+function deleteCustomPersona(i) {
+const cps = getCustomPersonas();
+const cp = cps[i];
+if (!cp) return;
+cps.splice(i, 1);
+setCustomPersonas(cps);
+const sel = document.getElementById('persona-select');
+const wasSelected = sel.value === cp.prompt;
+Array.from(sel.options).forEach(function (o) { if (o.value === cp.prompt && o.value !== '__NEW__') o.remove(); });
+if (wasSelected) sel.selectedIndex = 0;
+if (appSettings.persona === cp.prompt) { appSettings.persona = ''; saveSettings(); }
+renderSettingsUI();
+}
+function openSettingsModal() {
+renderSettingsUI();
+document.getElementById('settings-modal').classList.add('open');
+}
+function closeSettingsModal() {
+const m = document.getElementById('settings-modal');
+if (m) m.classList.remove('open');
+}
+function resetSettings() {
+if (!confirm('Reset all settings to their defaults?')) return;
+appSettings = Object.assign({}, SETTINGS_DEFAULTS);
+saveSettings();
+applyTheme();
+applyFontSize();
+applyDefaultTool();
+applyEnterHint();
+document.getElementById('persona-select').selectedIndex = 0;
+renderSettingsUI();
+}
+async function deleteAllChats() {
+if (isStreaming) { alert('Wait for the current answer to finish first.'); return; }
+if (!chats.length) { alert('You have no chats to delete.'); return; }
+if (!confirm('Delete ALL your chats and their files? This cannot be undone.')) return;
+const ids = chats.map(function (c) { return c.id; });
+for (const id of ids) {
+try { await fetch(`/api/chats/${id}`, { method: 'DELETE', headers: getAuthHeaders() }); } catch (e) {}
+}
+chats = [];
+closeSettingsModal();
+await startNewChat();
+}
+function initSettings() {
+loadSettings();
+getCustomPersonas().forEach(function (cp) { if (cp && cp.name && cp.prompt) addPersonaOption(cp.name, cp.prompt); });
+applyTheme();
+applyFontSize();
+applyDefaultPersona();
+if (appSettings.tool !== 'none') applyDefaultTool();
+applyEnterHint();
+try {
+const mq = window.matchMedia('(prefers-color-scheme: light)');
+const onChange = function () { if (appSettings.theme === 'system') applyTheme(); };
+if (mq.addEventListener) mq.addEventListener('change', onChange);
+} catch (e) {}
+}
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSettingsModal(); });
+// ===================== END OF SETTINGS =====================
+window.addEventListener('DOMContentLoaded', () => { initSettings(); handleOAuthRedirect(); updateUserBox(); loadOAuthButtons(); initStorage(); });
 </script>
 </body>
 </html>"""
