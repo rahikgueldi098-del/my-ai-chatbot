@@ -450,6 +450,50 @@ def check_daily_quota(user: Any) -> bool:
     return True
 
 
+# --- Monthly spending cap PER USER (counted from the cost_usd column of api_logs) ---
+# Set MONTHLY_USER_BUDGET_USD in Vercel (e.g. 1.50). 0 = no cap. Admins are never capped.
+# Total worst case for you = number of users x this cap.
+MONTHLY_USER_BUDGET_USD = float(os.environ.get("MONTHLY_USER_BUDGET_USD", "0"))
+_budget_cache: Dict[str, List[float]] = {}  # user_id -> [spent this month, fetched_at]
+_budget_lock = threading.Lock()
+
+
+def check_monthly_budget(user: Any) -> bool:
+    """True while this user is still under the monthly spending cap."""
+    if not MONTHLY_USER_BUDGET_USD:
+        return True
+    if ADMIN_EMAILS and (user.email or "").lower() in ADMIN_EMAILS:
+        return True
+    now = time.time()
+    with _budget_lock:
+        entry = _budget_cache.get(user.id)
+    if entry is None or now - entry[1] > 60:
+        try:
+            month_start = (
+                datetime.now(timezone.utc)
+                .replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                .isoformat()
+            )
+            spent, offset = 0.0, 0
+            while True:  # read the user's cost rows page by page
+                rows = (
+                    user.db.table("api_logs").select("cost_usd")
+                    .eq("user_id", user.id).gte("created_at", month_start)
+                    .range(offset, offset + 999).execute().data or []
+                )
+                spent += sum(float(r.get("cost_usd") or 0) for r in rows)
+                if len(rows) < 1000 or offset >= 20000:
+                    break
+                offset += 1000
+            entry = [spent, now]
+        except Exception as ex:
+            print("Budget check failed (allowing request):", ex)
+            return True
+        with _budget_lock:
+            _budget_cache[user.id] = entry
+    return entry[0] < MONTHLY_USER_BUDGET_USD
+
+
 # --- Original files live in Supabase Storage (private bucket, one folder per user) ---
 STORAGE_BUCKET = os.environ.get("STORAGE_BUCKET", "user-files")
 
@@ -5568,6 +5612,16 @@ def chat_endpoint(
         raise HTTPException(
             status_code=429,
             detail=f"Daily limit reached ({DAILY_REQUEST_LIMIT} messages per day). Try again tomorrow.",
+        )
+
+    if not check_monthly_budget(user):
+        log_analytics_entry(
+            "/api/chat", 429, 0.0, 0, 0, client_ip, user=user, model=MODEL_NAME,
+            error="Monthly budget",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="You have used your monthly allowance. It resets at the start of next month.",
         )
 
     try:
