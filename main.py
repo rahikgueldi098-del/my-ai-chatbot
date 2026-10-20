@@ -2222,6 +2222,50 @@ html.light .remember-row { color: #555; }
 html.light .help-search { background: #fff; color: #1f2328; border-color: #d4d4da; }
 html.light .help-body { color: #555; }
 html.light .help-body a { color: #0369a1; }
+/* ===== Mobile : suggestions en carrousel swipable ===== */
+.chip .chip-t { display: inline; }
+.chip .chip-s { display: none; }
+@media (max-width: 768px) {
+  .welcome-chips {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    gap: 10px;
+    margin: 18px -12px 0;
+    padding: 4px 16px 8px;
+    scroll-padding: 0 16px;
+  }
+  .welcome-chips::-webkit-scrollbar { display: none; }
+  .welcome-chips .chip {
+    flex: 0 0 72%;
+    max-width: 280px;
+    scroll-snap-align: start;
+    white-space: normal;
+    text-align: left;
+    border-radius: 16px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .welcome-chips .chip .chip-t { font-weight: 600; color: #ececec; font-size: 0.95rem; }
+  .welcome-chips .chip .chip-s { display: block; font-size: 0.8rem; color: #888; line-height: 1.35; }
+  .chips-row {
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    margin: 0 -10px;
+    padding: 0 10px 4px;
+  }
+  .chips-row::-webkit-scrollbar { display: none; }
+  .chips-row .chip { scroll-snap-align: start; padding: 8px 14px; font-size: 0.85rem; }
+}
+html.light .welcome-chips .chip .chip-t { color: #111; }
+html.light .welcome-chips .chip .chip-s { color: #666; }
 </style>
 </head>
 <body>
@@ -3367,10 +3411,11 @@ function updateScrollBtn() {
   });
 })();
 const WELCOME_SUGGESTIONS = [
-  { label: '📄 Help me write a CV', text: 'Help me write a CV. Here is my background: ' },
-  { label: '📚 Explain this lesson', text: 'Explain this lesson in simple words: ' },
-  { label: '✉️ Write a professional email', text: 'Write a professional email about: ' },
-  { label: '💡 Give me project ideas', text: 'Give me 5 project ideas about: ' }
+  { label: '📄 Help me write a CV', sub: 'Turn your background into a clean CV', text: 'Help me write a CV. Here is my background: ' },
+  { label: '📚 Explain this lesson', sub: 'Get it in simple words', text: 'Explain this lesson in simple words: ' },
+  { label: '✉️ Write a professional email', sub: 'Polite, clear and ready to send', text: 'Write a professional email about: ' },
+  { label: '🌐 Translate a text', sub: 'Into English, French, Arabic…', text: 'Translate the following text to English: ' },
+  { label: '💡 Give me project ideas', sub: 'Five ideas to get you started', text: 'Give me 5 project ideas about: ' }
 ];
 function fillInput(text) {
   const input = document.getElementById('user-input');
@@ -3391,7 +3436,14 @@ function showWelcome(box) {
   WELCOME_SUGGESTIONS.forEach(s => {
     const b = document.createElement('button');
     b.className = 'chip';
-    b.textContent = s.label;
+    const t = document.createElement('span');
+    t.className = 'chip-t';
+    t.textContent = s.label;
+    const sub = document.createElement('span');
+    sub.className = 'chip-s';
+    sub.textContent = s.sub || '';
+    b.appendChild(t);
+    b.appendChild(sub);
     b.onclick = () => fillInput(s.text);
     row.appendChild(b);
   });
