@@ -2915,6 +2915,30 @@ function pickWelcome() {
   lastWelcomeIdx = i;
   return WELCOME_LINES[i].replace('{n}', userName ? ', ' + userName : '');
 }
+// ---- Tooltips that show the shortcut when the mouse is on a button ----
+const IS_MAC = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '');
+const MOD = IS_MAC ? 'Cmd' : 'Ctrl';
+const SHORTCUT_TITLES = {
+  send: () => 'Send (Enter)',
+  newChat: () => 'Start a new chat (' + MOD + ' + K)',
+  input: () => 'Click here or press ' + MOD + ' + / to type. Enter = send, Shift + Enter = new line',
+  attach: () => 'Attach files. You can also drag and drop them, or paste an image with ' + MOD + ' + V',
+  memory: () => 'Memory: what the AI remembers about you. Or write "Remember that..." in the chat',
+  scroll: () => 'Scroll to the latest message',
+  endCall: () => 'End the call (Esc)'
+};
+function applyShortcutTitles() {
+  const set = (id, key) => { const el = document.getElementById(id); if (el) el.title = SHORTCUT_TITLES[key](); };
+  set('send-btn', 'send');
+  set('new-chat-btn', 'newChat');
+  set('user-input', 'input');
+  set('attach-btn', 'attach');
+  set('memory-btn', 'memory');
+  set('scroll-bottom-btn', 'scroll');
+  const end = document.querySelector('.live-ctl.end');
+  if (end) end.title = SHORTCUT_TITLES.endCall();
+}
+window.addEventListener('DOMContentLoaded', applyShortcutTitles);
 // ---- Messages left today ----
 async function fetchQuota() {
   const el = document.getElementById('quota-note');
@@ -4218,9 +4242,11 @@ if (!btn) return;
 if (streaming) {
 btn.innerText = 'Stop ⏹';
 btn.classList.add('stop-btn');
+btn.title = 'Stop the answer';
 } else {
 btn.innerText = 'Send';
 btn.classList.remove('stop-btn');
+btn.title = SHORTCUT_TITLES.send();
 }
 }
 function buildHistoryForApi() {
