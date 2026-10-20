@@ -241,6 +241,10 @@ class NameRequest(BaseModel):
     name: str
 
 
+class MemoryRequest(BaseModel):
+    text: str
+
+
 class RenameChatRequest(BaseModel):
     title: str
 
@@ -1910,6 +1914,11 @@ header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justi
 .welcome-msg { margin: auto; text-align: center; padding: 24px 12px; color: #ececec; }
 .welcome-msg .welcome-title { font-size: 1.7rem; font-weight: 600; line-height: 1.3; }
 .welcome-msg .welcome-sub { margin-top: 8px; color: #888; font-size: 0.95rem; }
+.welcome-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 18px; }
+.welcome-chips .chip { font-size: 0.88rem; padding: 8px 14px; }
+.mem-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid #333; font-size: 0.9rem; }
+.mem-row span { min-width: 0; word-break: break-word; }
+.mem-del { background: none; border: none; color: #f87171; cursor: pointer; font-size: 1rem; flex-shrink: 0; }
 .message { display: flex; flex-direction: column; gap: 6px; max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.95rem; line-height: 1.6; position: relative; word-break: break-word; }
 .user { align-self: flex-end; background-color: #303030; color: #fff; border-bottom-right-radius: 2px; }
 .model { align-self: flex-start; background-color: #212121; color: #ececec; border-bottom-left-radius: 2px; border: 1px solid #333; width: 100%; }
@@ -2180,6 +2189,7 @@ html.light .help-body a { color: #0369a1; }
 <option value="You are a creative writer and storytelling assistant with a rich, expressive vocabulary.">Creative Writer</option>
 <option value="__NEW__">➕ Add Custom Persona...</option>
 </select>
+<button id="memory-btn" class="toggle-btn" onclick="openMemoryModal()" title="Memory: what the AI remembers about you" aria-label="Memory">🧠</button>
 <button id="settings-btn" class="toggle-btn" onclick="openSettingsModal()" title="Settings" aria-label="Settings">⚙️</button>
 </div>
 </header>
@@ -2263,6 +2273,19 @@ html.light .help-body a { color: #0369a1; }
 <a id="auth-switch" href="#" onclick="toggleAuthMode(); return false;">No account? Sign up</a>
 <div style="font-size:0.75rem;color:#888;text-align:center;">By continuing you agree to the <a href="/terms" target="_blank" style="color:#38bdf8;">Terms</a> and <a href="/privacy" target="_blank" style="color:#38bdf8;">Privacy Policy</a>.</div>
 <div id="oauth-box" style="display:none;margin-top:14px;border-top:1px solid #333;padding-top:14px;flex-direction:column;gap:8px;"></div>
+</div>
+</div>
+<div id="memory-modal" class="modal-overlay" onclick="if(event.target===this) closeMemoryModal()">
+<div class="modal-content" style="max-width:480px;">
+<div class="modal-header">
+<div class="modal-title">🧠 Memory</div>
+<button class="toggle-btn" onclick="closeMemoryModal()">✕</button>
+</div>
+<div style="font-size:0.85rem;color:#888;">Facts the AI remembers in every chat. You can also write in the chat: <b>"Remember that I am a student"</b>.</div>
+<div id="memory-list" style="max-height:40vh;overflow-y:auto;"></div>
+<input id="memory-input" class="auth-input" type="text" maxlength="200" placeholder="Example: I am a student in Casablanca" onkeydown="if(event.key==='Enter') addMemory()">
+<div id="memory-msg" style="font-size:0.8rem;color:#f87171;min-height:1em;"></div>
+<button id="memory-add" onclick="addMemory()">Add to memory</button>
 </div>
 </div>
 <div id="name-modal" class="modal-overlay" style="z-index:190;">
@@ -2831,6 +2854,19 @@ function pickWelcome() {
   lastWelcomeIdx = i;
   return WELCOME_LINES[i].replace('{n}', userName ? ', ' + userName : '');
 }
+const WELCOME_SUGGESTIONS = [
+  { label: '📄 Help me write a CV', text: 'Help me write a CV. Here is my background: ' },
+  { label: '📚 Explain this lesson', text: 'Explain this lesson in simple words: ' },
+  { label: '✉️ Write a professional email', text: 'Write a professional email about: ' },
+  { label: '💡 Give me project ideas', text: 'Give me 5 project ideas about: ' }
+];
+function fillInput(text) {
+  const input = document.getElementById('user-input');
+  if (!input) return;
+  input.value = text;
+  input.focus();
+  autoExpand(input);
+}
 function showWelcome(box) {
   const d = document.createElement('div');
   d.className = 'welcome-msg';
@@ -2838,7 +2874,76 @@ function showWelcome(box) {
   t.className = 'welcome-title';
   t.textContent = pickWelcome();
   d.appendChild(t);
+  const row = document.createElement('div');
+  row.className = 'welcome-chips';
+  WELCOME_SUGGESTIONS.forEach(s => {
+    const b = document.createElement('button');
+    b.className = 'chip';
+    b.textContent = s.label;
+    b.onclick = () => fillInput(s.text);
+    row.appendChild(b);
+  });
+  d.appendChild(row);
   box.appendChild(d);
+}
+// ---- Memory ----
+function renderMemories(list) {
+  const box = document.getElementById('memory-list');
+  box.innerHTML = '';
+  if (!list || !list.length) {
+    box.innerHTML = '<div style="color:#666;padding:10px 0;font-size:0.9rem;">Nothing remembered yet.</div>';
+    return;
+  }
+  list.forEach(m => {
+    const row = document.createElement('div');
+    row.className = 'mem-row';
+    const sp = document.createElement('span');
+    sp.textContent = m.text;
+    const del = document.createElement('button');
+    del.className = 'mem-del';
+    del.textContent = '🗑';
+    del.title = 'Forget this';
+    del.onclick = () => deleteMemory(m.id);
+    row.appendChild(sp);
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+}
+async function openMemoryModal() {
+  document.getElementById('memory-modal').classList.add('open');
+  document.getElementById('memory-msg').textContent = '';
+  try {
+    const r = await fetch('/api/memory', { headers: getAuthHeaders() });
+    const d = await r.json().catch(() => ({}));
+    renderMemories(d.memories || []);
+  } catch (e) { renderMemories([]); }
+}
+function closeMemoryModal() {
+  document.getElementById('memory-modal').classList.remove('open');
+}
+async function addMemory() {
+  const inp = document.getElementById('memory-input');
+  const msg = document.getElementById('memory-msg');
+  const text = (inp.value || '').trim();
+  if (!text) return;
+  msg.textContent = '';
+  try {
+    const r = await fetch('/api/memory', { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ text }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { msg.textContent = d.detail || ('Error ' + r.status); return; }
+    inp.value = '';
+    renderMemories(d.memories || []);
+  } catch (e) { msg.textContent = 'Network error. Try again.'; }
+}
+async function deleteMemory(id) {
+  const msg = document.getElementById('memory-msg');
+  msg.textContent = '';
+  try {
+    const r = await fetch('/api/memory/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { msg.textContent = d.detail || ('Error ' + r.status); return; }
+    renderMemories(d.memories || []);
+  } catch (e) { msg.textContent = 'Network error. Try again.'; }
 }
 function applyProfile(d) {
   if (d.name) {
@@ -5466,6 +5571,133 @@ def get_me(user: AuthUser = Depends(require_user)):
     })
 
 
+# --- Memory: short facts the user wants the AI to remember in every chat ---
+# Stored in Supabase Auth user_metadata (no extra table needed).
+MAX_MEMORIES = 30
+MAX_MEMORY_CHARS = 200
+
+
+def _clean_memories(meta: Dict[str, Any]) -> List[Dict[str, str]]:
+    items = meta.get("memories")
+    out: List[Dict[str, str]] = []
+    if isinstance(items, list):
+        for m in items:
+            if (
+                isinstance(m, dict)
+                and isinstance(m.get("id"), str)
+                and isinstance(m.get("text"), str)
+                and m["text"].strip()
+            ):
+                out.append({"id": m["id"], "text": " ".join(m["text"].split())[:MAX_MEMORY_CHARS]})
+    return out[:MAX_MEMORIES]
+
+
+def _save_meta(user: AuthUser, patch: Dict[str, Any]) -> bool:
+    try:
+        import httpx  # installed together with the supabase package
+
+        r = httpx.put(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {user.token}",
+                "Content-Type": "application/json",
+            },
+            json={"data": patch},
+            timeout=10,
+        )
+        if r.status_code >= 400:
+            return False
+        user.meta.update(patch)  # keep the cached login object up to date
+        return True
+    except Exception as e:
+        print(f"_save_meta error: {e}")
+        return False
+
+
+def _add_memory(user: AuthUser, text: str) -> Optional[Dict[str, str]]:
+    text = " ".join(str(text).split())[:MAX_MEMORY_CHARS]
+    if not text:
+        return None
+    mems = _clean_memories(user.meta)
+    if any(m["text"].lower() == text.lower() for m in mems):
+        return None
+    if len(mems) >= MAX_MEMORIES:
+        return None
+    item = {"id": base64.urlsafe_b64encode(os.urandom(6)).decode().rstrip("="), "text": text}
+    if not _save_meta(user, {"memories": mems + [item]}):
+        return None
+    return item
+
+
+# "remember that ..." / "retiens que ..." typed in the chat is saved automatically.
+_REMEMBER_RE = re.compile(
+    r"^\s*(?:please\s+|s'il te pla[iî]t\s+)?(?:remember|retiens|souviens[- ]toi|rappelle[- ]toi)"
+    r"\s*(?:that\b|que\b|qu'|:)\s*(.{3,})$",
+    re.I | re.S,
+)
+
+
+def maybe_remember(user: AuthUser, message: str) -> Optional[str]:
+    if not message or len(message) > 300:
+        return None
+    m = _REMEMBER_RE.match(message)
+    if not m:
+        return None
+    item = _add_memory(user, m.group(1))
+    return item["text"] if item else None
+
+
+def build_user_context(user: AuthUser, just_saved: Optional[str] = None) -> str:
+    """Text added to the AI's instructions: the user's name and remembered facts."""
+    parts: List[str] = []
+    name = " ".join(str(user.meta.get("display_name") or "").split())[:40]
+    if name:
+        parts.append(
+            f"The user's name is {name}. Use it naturally from time to time "
+            "(for example in a greeting), not in every message."
+        )
+    mems = [m["text"] for m in _clean_memories(user.meta)]
+    if mems:
+        parts.append(
+            "Facts the user asked you to remember. Use them only when they are relevant, "
+            "and do not list them unless asked:\n" + "\n".join("- " + t for t in mems)
+        )
+    if just_saved:
+        parts.append(
+            f'The user just asked you to remember: "{just_saved}". It is saved. '
+            "Confirm briefly in one short sentence."
+        )
+    return ("\n\n" + "\n".join(parts)) if parts else ""
+
+
+@app.get("/api/memory")
+def list_memory(user: AuthUser = Depends(require_user)):
+    return JSONResponse({"memories": _clean_memories(user.meta), "max": MAX_MEMORIES})
+
+
+@app.post("/api/memory")
+def add_memory_route(body: MemoryRequest, user: AuthUser = Depends(require_user)):
+    if not " ".join(body.text.split()):
+        return JSONResponse({"detail": "Type something to remember."}, status_code=400)
+    if len(_clean_memories(user.meta)) >= MAX_MEMORIES:
+        return JSONResponse(
+            {"detail": f"Memory is full ({MAX_MEMORIES} items). Delete one first."}, status_code=400
+        )
+    item = _add_memory(user, body.text)
+    if not item:
+        return JSONResponse({"detail": "Could not save (maybe it already exists)."}, status_code=400)
+    return JSONResponse({"memories": _clean_memories(user.meta)})
+
+
+@app.delete("/api/memory/{memory_id}")
+def delete_memory_route(memory_id: str, user: AuthUser = Depends(require_user)):
+    mems = [m for m in _clean_memories(user.meta) if m["id"] != memory_id]
+    if not _save_meta(user, {"memories": mems}):
+        return JSONResponse({"detail": "Could not delete. Try again."}, status_code=502)
+    return JSONResponse({"memories": mems})
+
+
 @app.post("/api/me/name")
 def set_my_name(body: NameRequest, user: AuthUser = Depends(require_user)):
     """Save the name the user chose (kept in Supabase Auth user_metadata)."""
@@ -5770,6 +6002,10 @@ def chat_endpoint(
         system_instruction = (
             body.system_instruction or "You are a helpful assistant."
         ) + CANVAS_HINT
+        try:
+            system_instruction += build_user_context(user, maybe_remember(user, message))
+        except Exception as e:
+            print(f"user context error: {e}")
         web_search = body.web_search
 
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -6316,6 +6552,7 @@ def live_token(
     system_instruction = (
         (body.system_instruction or "You are a helpful assistant.")[:4000]
         + LIVE_HINT
+        + build_user_context(user)
         + _live_chat_context(user, chat_id)
     )
     log_analytics_entry(
