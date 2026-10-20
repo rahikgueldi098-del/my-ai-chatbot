@@ -3016,6 +3016,108 @@ function applyShortcutTitles() {
   if (end) end.title = SHORTCUT_TITLES.endCall();
 }
 window.addEventListener('DOMContentLoaded', applyShortcutTitles);
+// ---- Read aloud: the browser speaks the answer (free, no extra AI cost) ----
+const TTS_OK = ('speechSynthesis' in window) && ('SpeechSynthesisUtterance' in window);
+const TTS_LANG_TAG = { ar: 'ar-SA', fr: 'fr-FR', en: 'en-US' };
+let ttsToken = 0;
+let ttsBtn = null;
+function ttsClean(t) {
+  let s = String(t || '')
+    .replace(/```[\s\S]*?(?:```|$)/g, ' ')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/\$\$[\s\S]*?\$\$/g, ' ');
+  s = s.split('\n').map(line => {
+    const m = line.match(/^\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)\s+(.*)$/);
+    if (!m) return line;
+    let x = m[1].trim();
+    if (x && !/[.!?؟:;]$/.test(x)) x += '.';
+    return x;
+  }).join('\n');
+  return s
+    .replace(/[*_~]+/g, '')
+    .replace(/[|#>]+/g, ' ')
+    .replace(/\p{Extended_Pictographic}/gu, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{2,}/g, '. ')
+    .replace(/\n/g, ' ')
+    .replace(/\s+([.,!?;:؟،])/g, '$1')
+    .replace(/(?:\.\s*){2,}/g, '. ')
+    .trim();
+}
+function ttsChunks(text) {
+  const parts = text.match(/[^.!?؟۔]+[.!?؟۔]*\s*/g) || [text];
+  const out = [];
+  let cur = '';
+  let curLang = '';
+  parts.forEach(s => {
+    const l = ttsLang(s);
+    if (cur && (l !== curLang || (cur + s).length > 180)) { out.push(cur.trim()); cur = s; curLang = l; }
+    else { cur += s; if (!curLang) curLang = l; }
+  });
+  if (cur.trim()) out.push(cur.trim());
+  const final = [];
+  out.forEach(c => {
+    if (c.length <= 220) { final.push(c); return; }
+    (c.match(/.{1,200}(?:\s|$)/g) || [c]).forEach(x => { if (x.trim()) final.push(x.trim()); });
+  });
+  return final;
+}
+function ttsLang(s) {
+  const letters = s.replace(/[^\p{L}]/gu, '');
+  const ar = (s.match(/[\u0600-\u06FF]/g) || []).length;
+  if (letters.length && ar / letters.length > 0.3) return 'ar';
+  const w = ' ' + s.toLowerCase().replace(/[^\p{L}\s']/gu, ' ') + ' ';
+  const count = (arr) => arr.reduce((n, x) => n + (w.split(' ' + x + ' ').length - 1), 0);
+  const fr = count(['le', 'la', 'les', 'des', 'une', 'est', 'que', 'pour', 'dans', 'avec', 'vous', 'je', 'nous', 'et', 'pas', 'sur', 'du', 'un']) + (s.match(/[àâçéèêëîïôûùüœ]/gi) || []).length * 0.5;
+  const en = count(['the', 'and', 'is', 'to', 'of', 'you', 'in', 'for', 'that', 'with', 'this', 'are', 'it', 'on', 'as', 'a']);
+  return fr > en ? 'fr' : 'en';
+}
+function ttsVoice(lang) {
+  let vs = [];
+  try { vs = speechSynthesis.getVoices() || []; } catch (e) {}
+  const pref = vs.filter(v => (v.lang || '').toLowerCase().indexOf(lang) === 0);
+  return pref.find(v => /natural|google|online/i.test(v.name)) || pref[0] || null;
+}
+function stopReadAloud() {
+  ttsToken++;
+  if (TTS_OK) { try { speechSynthesis.cancel(); } catch (e) {} }
+  if (ttsBtn) { ttsBtn.innerText = '🔊 Read aloud'; ttsBtn = null; }
+}
+function toggleReadAloud(btn, text) {
+  if (!TTS_OK) return;
+  if (ttsBtn === btn) { stopReadAloud(); return; }
+  stopReadAloud();
+  const clean = ttsClean(text);
+  if (!clean) {
+    btn.innerText = '🔇 Nothing to read';
+    setTimeout(() => { btn.innerText = '🔊 Read aloud'; }, 1500);
+    return;
+  }
+  const chunks = ttsChunks(clean);
+  const my = ++ttsToken;
+  ttsBtn = btn;
+  btn.innerText = '⏹ Stop';
+  let noArabic = false;
+  chunks.forEach((c, i) => {
+    const lang = ttsLang(c);
+    const u = new SpeechSynthesisUtterance(c);
+    u.lang = TTS_LANG_TAG[lang];
+    const v = ttsVoice(lang);
+    if (v) u.voice = v; else if (lang === 'ar') noArabic = true;
+    const done = () => { if (my === ttsToken && i === chunks.length - 1) stopReadAloud(); };
+    u.onend = done;
+    u.onerror = done;
+    speechSynthesis.speak(u);
+  });
+  if (noArabic) btn.title = 'No Arabic voice was found on this device, so it may sound wrong. Install one in your system settings.';
+}
+if (TTS_OK) {
+  try { speechSynthesis.getVoices(); } catch (e) {}
+  window.addEventListener('beforeunload', () => { try { speechSynthesis.cancel(); } catch (e) {} });
+}
 // ---- Compare two answers ----
 function openCompareModal() {
   const src = document.getElementById('persona-select');
@@ -3396,6 +3498,7 @@ function skipName() {
   document.getElementById('name-modal').classList.remove('open');
 }
 function logout() {
+  stopReadAloud();
   authDel('supabase_name');
   authDel('supabase_token');
   authDel('supabase_refresh');
@@ -3670,6 +3773,7 @@ list.appendChild(item);
 function renderChatBox() {
 const box = document.getElementById('chat-box');
 if (!box) return;
+stopReadAloud();
 closeCanvas();
 box.innerHTML = '';
 if (!Array.isArray(currentHistory)) return;
@@ -4250,6 +4354,14 @@ dcBtn.innerText = '🔍 Double check';
 dcBtn.title = 'The AI re-reads this answer, looks for mistakes and says how sure it is';
 dcBtn.onclick = () => doubleCheckAnswer(msgDiv, text);
 metaSpan.appendChild(dcBtn);
+if (TTS_OK) {
+const rdBtn = document.createElement('button');
+rdBtn.className = 'action-btn rd-btn';
+rdBtn.innerText = '🔊 Read aloud';
+rdBtn.title = 'Read this answer out loud (click again to stop)';
+rdBtn.onclick = () => toggleReadAloud(rdBtn, text);
+metaSpan.appendChild(rdBtn);
+}
 const arts = extractArtifacts(text);
 arts.forEach((a, i) => {
 const pb = document.createElement('button');
@@ -4533,6 +4645,7 @@ return currentHistory
 .map(m => ({ role: m.role || 'user', content: String(m.content).replace(/!\[[^\]]*\]\(data:image\/[^)]*\)/g, '[chart image]') }));
 }
 async function sendMessage() {
+stopReadAloud();
 const input = document.getElementById('user-input');
 let text = input ? input.value.trim() : '';
 const multi = selectedFiles.slice();
