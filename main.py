@@ -2378,6 +2378,15 @@ Click 📎 next to the message box.
 </ul>
 </div></details>
 
+<details class="help-item"><summary>⌨️ Keyboard shortcuts and quick tips</summary><div class="help-body">
+<b>Ctrl + K</b> (Cmd + K on Mac): start a new chat.<br>
+<b>Ctrl + /</b>: jump to the message box.<br>
+<b>Enter</b>: send. <b>Shift + Enter</b>: new line.<br>
+<b>Ctrl + V</b>: paste an image from your clipboard.<br>
+<b>Drag and drop</b> files anywhere on the page to attach them.<br>
+Write <b>"Remember that ..."</b> in a message to save a fact in 🧠 Memory.
+</div></details>
+
 <details class="help-item"><summary>What are personas?</summary><div class="help-body">
 A persona sets how the AI behaves (for example Senior Engineer or Ultra-Concise). Pick one in the dropdown at the top. Choose "Add Custom Persona..." to write your own. Custom personas are saved on this device, and you can delete them in ⚙️ Settings.
 </div></details>
