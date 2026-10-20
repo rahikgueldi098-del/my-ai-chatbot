@@ -460,6 +460,47 @@ def check_daily_quota(user: Any) -> bool:
     return True
 
 
+def get_daily_usage(user: Any) -> Dict[str, Any]:
+    """How many chat messages the user has used today (does NOT count a new one)."""
+    if not DAILY_REQUEST_LIMIT:
+        return {"unlimited": True}
+    if ADMIN_EMAILS and (user.email or "").lower() in ADMIN_EMAILS:
+        return {"unlimited": True}
+    now = time.time()
+    with _quota_lock:
+        entry = _quota_cache.get(user.id)
+    if entry is None or now - entry[1] > 60:
+        try:
+            day_start = (
+                datetime.now(timezone.utc)
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .isoformat()
+            )
+            res = (
+                user.db.table("api_logs")
+                .select("id", count="exact")
+                .eq("user_id", user.id)
+                .eq("endpoint", "/api/chat")
+                .eq("status", 200)
+                .gte("created_at", day_start)
+                .limit(1)
+                .execute()
+            )
+            entry = [float(res.count or 0), now]
+        except Exception as ex:
+            print("Usage check failed:", ex)
+            return {"unlimited": True}
+        with _quota_lock:
+            _quota_cache[user.id] = entry
+    used = int(entry[0])
+    return {
+        "unlimited": False,
+        "limit": DAILY_REQUEST_LIMIT,
+        "used": used,
+        "left": max(0, DAILY_REQUEST_LIMIT - used),
+    }
+
+
 # --- Monthly spending cap PER USER (counted from the cost_usd column of api_logs) ---
 # Set MONTHLY_USER_BUDGET_USD in Vercel (e.g. 1.50). 0 = no cap. Admins are never capped.
 # Total worst case for you = number of users x this cap.
@@ -1914,6 +1955,14 @@ header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justi
 .welcome-msg { margin: auto; text-align: center; padding: 24px 12px; color: #ececec; }
 .welcome-msg .welcome-title { font-size: 1.7rem; font-weight: 600; line-height: 1.3; }
 .welcome-msg .welcome-sub { margin-top: 8px; color: #888; font-size: 0.95rem; }
+#input-wrapper { position: relative; }
+#scroll-bottom-btn { display: none; position: absolute; right: 24px; bottom: calc(100% + 6px); width: 38px; height: 38px; border-radius: 50%; border: 1px solid #424242; background: #2f2f2f; color: #fff; font-size: 1.1rem; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.4); z-index: 5; }
+#scroll-bottom-btn.show { display: block; }
+#scroll-bottom-btn:hover { background: #3a3a3a; }
+#drop-overlay { display: none; position: fixed; inset: 0; z-index: 300; background: rgba(0,0,0,0.65); color: #fff; align-items: center; justify-content: center; font-size: 1.3rem; border: 3px dashed #38bdf8; pointer-events: none; }
+#drop-overlay.show { display: flex; }
+.quota-note { font-size: 0.72rem; color: #777; text-align: center; min-height: 1em; }
+.quota-note.low { color: #fbbf24; }
 .welcome-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 18px; }
 .welcome-chips .chip { font-size: 0.88rem; padding: 8px 14px; }
 .mem-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid #333; font-size: 0.9rem; }
@@ -2208,6 +2257,7 @@ html.light .help-body a { color: #0369a1; }
 <span id="file-name"></span>
 <button id="remove-file-btn" onclick="clearFile()">✕</button>
 </div>
+<button id="scroll-bottom-btn" onclick="scrollChatToBottom()" title="Scroll to the latest message" aria-label="Scroll to bottom">⬇</button>
 <div id="input-container">
 <input type="file" id="file-input" multiple onchange="handleFileSelect(event)">
 <button id="attach-btn" class="icon-btn" onclick="document.getElementById('file-input').click()" title="Attach File">📎</button>
@@ -2217,6 +2267,7 @@ html.light .help-body a { color: #0369a1; }
 <textarea id="user-input" placeholder="Ask AI Assistant... (Shift + Enter for new line)" rows="1" onkeydown="handleKeyDown(event)" oninput="autoExpand(this)"></textarea>
 <button id="send-btn" onclick="handleSendOrStop()">Send</button>
 </div>
+<div id="quota-note" class="quota-note"></div>
 <div class="legal-note">AI can make mistakes, so double-check important information. <a href="#" onclick="openHelpModal(); return false;">Help</a> &middot; <a href="/privacy" target="_blank">Privacy</a> &middot; <a href="/terms" target="_blank">Terms</a></div>
 </div>
 </div>
@@ -2288,6 +2339,7 @@ html.light .help-body a { color: #0369a1; }
 <button id="memory-add" onclick="addMemory()">Add to memory</button>
 </div>
 </div>
+<div id="drop-overlay">📎 Drop your files here</div>
 <div id="name-modal" class="modal-overlay" style="z-index:190;">
 <div class="modal-content" style="max-width:380px;">
 <div class="modal-title">👋 What should I call you?</div>
@@ -2854,6 +2906,73 @@ function pickWelcome() {
   lastWelcomeIdx = i;
   return WELCOME_LINES[i].replace('{n}', userName ? ', ' + userName : '');
 }
+// ---- Messages left today ----
+async function fetchQuota() {
+  const el = document.getElementById('quota-note');
+  if (!el || !authGet('supabase_token')) return;
+  try {
+    const r = await fetch('/api/quota', { headers: getAuthHeaders() });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.unlimited || d.left === undefined) { el.textContent = ''; return; }
+    el.textContent = d.left + ' of ' + d.limit + ' messages left today';
+    el.className = 'quota-note' + (d.left <= Math.max(2, Math.floor(d.limit * 0.2)) ? ' low' : '');
+  } catch (e) {}
+}
+// ---- Scroll to bottom button ----
+function scrollChatToBottom() {
+  const box = document.getElementById('chat-box');
+  if (box) box.scrollTo({ top: box.scrollHeight, behavior: 'smooth' });
+}
+function updateScrollBtn() {
+  const box = document.getElementById('chat-box');
+  const b = document.getElementById('scroll-bottom-btn');
+  if (!box || !b) return;
+  b.classList.toggle('show', box.scrollHeight - box.scrollTop - box.clientHeight > 200);
+}
+// ---- Drag and drop files, paste images, keyboard shortcuts ----
+(function setupInputHelpers() {
+  const overlay = () => document.getElementById('drop-overlay');
+  let dragDepth = 0;
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).indexOf('Files') !== -1;
+  window.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; overlay().classList.add('show'); });
+  window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) overlay().classList.remove('show'); });
+  window.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth = 0;
+    overlay().classList.remove('show');
+    if (!authGet('supabase_token')) return;
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length) handleFileSelect({ target: { files: files } });
+  });
+  document.addEventListener('paste', (e) => {
+    const items = Array.from((e.clipboardData && e.clipboardData.files) || []);
+    const imgs = items.filter(f => (f.type || '').startsWith('image/'));
+    if (!imgs.length) return;
+    const t = e.target;
+    if (t && t.tagName === 'INPUT' && t.id !== 'user-input') return;
+    e.preventDefault();
+    handleFileSelect({ target: { files: imgs } });
+  });
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    if (e.key === 'k' || e.key === 'K') {
+      e.preventDefault();
+      if (authGet('supabase_token')) startNewChat();
+    } else if (e.key === '/') {
+      e.preventDefault();
+      const input = document.getElementById('user-input');
+      if (input) input.focus();
+    }
+  });
+  window.addEventListener('DOMContentLoaded', () => {
+    const box = document.getElementById('chat-box');
+    if (box) box.addEventListener('scroll', updateScrollBtn, { passive: true });
+    setInterval(updateScrollBtn, 800);
+  });
+})();
 const WELCOME_SUGGESTIONS = [
   { label: '📄 Help me write a CV', text: 'Help me write a CV. Here is my background: ' },
   { label: '📚 Explain this lesson', text: 'Explain this lesson in simple words: ' },
@@ -2958,6 +3077,7 @@ function applyProfile(d) {
     if (inp) setTimeout(() => inp.focus(), 50);
   }
   if (Array.isArray(currentHistory) && currentHistory.length === 0) renderChatBox();
+  fetchQuota();
 }
 async function saveName() {
   const inp = document.getElementById('name-input');
@@ -4232,6 +4352,7 @@ isStreaming = false;
 activeAbortController = null;
 updateSendBtnUI(false);
 if (filePayload || multi.length) refreshDocs();
+fetchQuota();
 }
 }
 function exportChat(format) {
@@ -5669,6 +5790,11 @@ def build_user_context(user: AuthUser, just_saved: Optional[str] = None) -> str:
             "Confirm briefly in one short sentence."
         )
     return ("\n\n" + "\n".join(parts)) if parts else ""
+
+
+@app.get("/api/quota")
+def get_quota(user: AuthUser = Depends(require_user)):
+    return JSONResponse(get_daily_usage(user))
 
 
 @app.get("/api/memory")
