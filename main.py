@@ -141,6 +141,8 @@ class AuthUser:
         self.id = str(user.id)
         self.email = getattr(user, "email", None)
         self.token = token
+        # Profile data stored in Supabase Auth (we keep the chosen name here).
+        self.meta: Dict[str, Any] = dict(getattr(user, "user_metadata", None) or {})
         # Client acting as this user -> RLS applies to every query.
         self.db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         self.db.postgrest.auth(token)
@@ -233,6 +235,10 @@ class EmailRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     access_token: str
     password: str
+
+
+class NameRequest(BaseModel):
+    name: str
 
 
 class RenameChatRequest(BaseModel):
@@ -1901,6 +1907,9 @@ header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justi
 .admin-btn { background: #1e293b; color: #38bdf8; border: 1px solid #334155; border-radius: 6px; padding: 6px 12px; font-size: 0.85rem; cursor: pointer; transition: 0.2s; font-weight: 600; }
 .admin-btn:hover { background: #334155; color: #fff; }
 #chat-box { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 800px; width: 100%; margin: 0 auto; }
+.welcome-msg { margin: auto; text-align: center; padding: 24px 12px; color: #ececec; }
+.welcome-msg .welcome-title { font-size: 1.7rem; font-weight: 600; line-height: 1.3; }
+.welcome-msg .welcome-sub { margin-top: 8px; color: #888; font-size: 0.95rem; }
 .message { display: flex; flex-direction: column; gap: 6px; max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 0.95rem; line-height: 1.6; position: relative; word-break: break-word; }
 .user { align-self: flex-end; background-color: #303030; color: #fff; border-bottom-right-radius: 2px; }
 .model { align-self: flex-start; background-color: #212121; color: #ececec; border-bottom-left-radius: 2px; border: 1px solid #333; width: 100%; }
@@ -2254,6 +2263,15 @@ html.light .help-body a { color: #0369a1; }
 <a id="auth-switch" href="#" onclick="toggleAuthMode(); return false;">No account? Sign up</a>
 <div style="font-size:0.75rem;color:#888;text-align:center;">By continuing you agree to the <a href="/terms" target="_blank" style="color:#38bdf8;">Terms</a> and <a href="/privacy" target="_blank" style="color:#38bdf8;">Privacy Policy</a>.</div>
 <div id="oauth-box" style="display:none;margin-top:14px;border-top:1px solid #333;padding-top:14px;flex-direction:column;gap:8px;"></div>
+</div>
+</div>
+<div id="name-modal" class="modal-overlay" style="z-index:190;">
+<div class="modal-content" style="max-width:380px;">
+<div class="modal-title">👋 What should I call you?</div>
+<input id="name-input" class="auth-input" type="text" maxlength="40" placeholder="Your first name" autocomplete="given-name" onkeydown="if(event.key==='Enter') saveName()">
+<div id="name-msg" style="font-size:0.8rem;color:#f87171;min-height:1em;"></div>
+<button id="name-submit" onclick="saveName()">Continue</button>
+<a href="#" onclick="skipName(); return false;" style="font-size:0.8rem;text-align:center;">Skip for now</a>
 </div>
 </div>
 <div id="help-modal" class="modal-overlay" onclick="if(event.target===this) closeHelpModal()">
@@ -2791,7 +2809,78 @@ function handleOAuthRedirect() {
     showAuth(String(err).replace(/\+/g, ' '));
   }
 }
+// ---- Name + welcome message ----
+let userName = authGet('supabase_name') || '';
+let nameAsked = false;
+let lastWelcomeIdx = -1;
+const WELCOME_LINES = [
+  'Where do we start{n}?',
+  'Hi{n}! What is on your mind today?',
+  'Ready when you are{n}. What shall we work on?',
+  'Welcome back{n}. What are we building today?',
+  'Hello{n}! Ask me anything.',
+  'What can I help you with{n}?',
+  'Good to see you{n}. Where should we begin?',
+  'Let us get started{n}. What do you need?',
+  'Hey{n}! Got a question, an idea, or some code?',
+  'So{n}, what are we tackling first?'
+];
+function pickWelcome() {
+  let i = Math.floor(Math.random() * WELCOME_LINES.length);
+  if (WELCOME_LINES.length > 1 && i === lastWelcomeIdx) i = (i + 1) % WELCOME_LINES.length;
+  lastWelcomeIdx = i;
+  return WELCOME_LINES[i].replace('{n}', userName ? ', ' + userName : '');
+}
+function showWelcome(box) {
+  const d = document.createElement('div');
+  d.className = 'welcome-msg';
+  const t = document.createElement('div');
+  t.className = 'welcome-title';
+  t.textContent = pickWelcome();
+  d.appendChild(t);
+  box.appendChild(d);
+}
+function applyProfile(d) {
+  if (d.name) {
+    userName = d.name;
+    authSet('supabase_name', d.name);
+  } else if (!nameAsked) {
+    nameAsked = true;
+    const inp = document.getElementById('name-input');
+    if (inp && !inp.value) inp.value = d.suggested_name || '';
+    const m = document.getElementById('name-modal');
+    if (m) m.classList.add('open');
+    if (inp) setTimeout(() => inp.focus(), 50);
+  }
+  if (Array.isArray(currentHistory) && currentHistory.length === 0) renderChatBox();
+}
+async function saveName() {
+  const inp = document.getElementById('name-input');
+  const msg = document.getElementById('name-msg');
+  const name = (inp.value || '').trim();
+  if (!name) { msg.textContent = 'Please type your name.'; return; }
+  const btn = document.getElementById('name-submit');
+  btn.disabled = true;
+  msg.textContent = '';
+  try {
+    const r = await fetch('/api/me/name', { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ name }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { msg.textContent = d.detail || ('Error ' + r.status); return; }
+    userName = d.name;
+    authSet('supabase_name', d.name);
+    document.getElementById('name-modal').classList.remove('open');
+    if (Array.isArray(currentHistory) && currentHistory.length === 0) renderChatBox();
+  } catch (e) {
+    msg.textContent = 'Network error. Try again.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+function skipName() {
+  document.getElementById('name-modal').classList.remove('open');
+}
 function logout() {
+  authDel('supabase_name');
   authDel('supabase_token');
   authDel('supabase_refresh');
   authDel('supabase_email');
@@ -3068,6 +3157,7 @@ if (!box) return;
 closeCanvas();
 box.innerHTML = '';
 if (!Array.isArray(currentHistory)) return;
+if (currentHistory.length === 0) { showWelcome(box); return; }
 currentHistory.forEach((msg) => {
 if (!msg) return;
 const role = msg.role || 'user';
@@ -3113,6 +3203,8 @@ function setImageSource(img, f) {
 function appendMessageUI(role, text, fileObj, metaObj) {
 const box = document.getElementById('chat-box');
 if (!box) return;
+const _w = box.querySelector('.welcome-msg');
+if (_w) _w.remove();
 const msgDiv = document.createElement('div');
 msgDiv.className = `message ${role}`;
 if (fileObj && Array.isArray(fileObj.multi)) {
@@ -4173,6 +4265,7 @@ if (!res.ok) return;
 const d = await res.json();
 const b = document.getElementById('analytics-btn');
 if (b) b.style.display = d.is_admin ? '' : 'none';
+applyProfile(d);
 } catch (e) {}
 }
 function fmtInt(n) { return Number(n || 0).toLocaleString(); }
@@ -5364,7 +5457,41 @@ def is_admin(user: AuthUser) -> bool:
 
 @app.get("/api/me")
 def get_me(user: AuthUser = Depends(require_user)):
-    return JSONResponse({"email": user.email, "is_admin": is_admin(user)})
+    suggested = str(user.meta.get("full_name") or user.meta.get("name") or "").strip()
+    return JSONResponse({
+        "email": user.email,
+        "is_admin": is_admin(user),
+        "name": str(user.meta.get("display_name") or "").strip(),
+        "suggested_name": suggested.split(" ")[0][:40] if suggested else "",
+    })
+
+
+@app.post("/api/me/name")
+def set_my_name(body: NameRequest, user: AuthUser = Depends(require_user)):
+    """Save the name the user chose (kept in Supabase Auth user_metadata)."""
+    name = " ".join(body.name.split())[:40]
+    if not name:
+        return JSONResponse({"detail": "Please type your name."}, status_code=400)
+    try:
+        import httpx  # installed together with the supabase package
+
+        r = httpx.put(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {user.token}",
+                "Content-Type": "application/json",
+            },
+            json={"data": {"display_name": name}},
+            timeout=10,
+        )
+        if r.status_code >= 400:
+            return JSONResponse({"detail": "Could not save your name. Try again."}, status_code=502)
+    except Exception as e:
+        print(f"set_my_name error: {e}")
+        return JSONResponse({"detail": "Could not save your name. Try again."}, status_code=502)
+    user.meta["display_name"] = name  # the cached login object stays up to date
+    return JSONResponse({"name": name})
 
 
 def _parse_ts(value: str) -> datetime:
@@ -6253,4 +6380,3 @@ def live_transcript(
             cost_usd=p * LIVE_INPUT_USD_PER_M + c * LIVE_OUTPUT_USD_PER_M,
         )
     return JSONResponse({"saved": saved})
-
