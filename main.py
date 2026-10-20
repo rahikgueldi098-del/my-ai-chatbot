@@ -241,6 +241,12 @@ class NameRequest(BaseModel):
     name: str
 
 
+class CompareRequest(BaseModel):
+    question: str
+    persona_a: str = "You are a helpful assistant."
+    persona_b: str = "You are a helpful assistant."
+
+
 class MemoryRequest(BaseModel):
     text: str
 
@@ -1963,6 +1969,23 @@ header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justi
 #drop-overlay.show { display: flex; }
 .quota-note { font-size: 0.72rem; color: #777; text-align: center; min-height: 1em; }
 .quota-note.low { color: #fbbf24; }
+.cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 700px) { .cmp-grid { grid-template-columns: 1fr; } }
+.cmp-col { background: #212121; border: 1px solid #333; border-radius: 10px; padding: 12px; min-width: 0; }
+.cmp-col h4 { margin: 0 0 8px; font-size: 0.85rem; color: #38bdf8; }
+.cmp-body { font-size: 0.9rem; line-height: 1.55; word-break: break-word; }
+.cmp-body pre { overflow-x: auto; background: #171717; padding: 8px; border-radius: 8px; }
+.cmp-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.cmp-row select { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 6px; padding: 6px 10px; font-size: 0.85rem; flex: 1; min-width: 140px; max-width: 100%; }
+#cmp-q { width: 100%; min-height: 70px; resize: vertical; padding: 10px 12px; border-radius: 8px; border: 1px solid #424242; background: #2f2f2f; color: #fff; font-size: 0.95rem; font-family: inherit; outline: none; }
+.data-sec { border: 1px solid #333; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.data-sec h4 { margin: 0; font-size: 0.95rem; }
+.data-sec p { margin: 0; font-size: 0.82rem; color: #888; }
+.data-btn { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 8px; padding: 9px 12px; font-size: 0.9rem; cursor: pointer; }
+.data-btn:hover { background: #383838; }
+.data-btn:disabled { opacity: 0.5; cursor: default; }
+.data-btn.danger { background: #3b1414; border-color: #7f1d1d; color: #fca5a5; }
+.data-btn.danger:hover { background: #4a1a1a; }
 .welcome-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 18px; }
 .welcome-chips .chip { font-size: 0.88rem; padding: 8px 14px; }
 .mem-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid #333; font-size: 0.9rem; }
@@ -2211,6 +2234,7 @@ html.light .help-body a { color: #0369a1; }
 <span class="export-title" id="user-email"></span>
 <button class="export-btn" onclick="logout()">Log out</button>
 <button class="export-btn" onclick="openHelpModal()">❓ Help &amp; About</button>
+<button class="export-btn" onclick="openDataModal()">🧹 Manage my data</button>
 </div>
 <div class="export-box">
 <span class="export-title">Export Chat</span>
@@ -2239,6 +2263,7 @@ html.light .help-body a { color: #0369a1; }
 <option value="__NEW__">➕ Add Custom Persona...</option>
 </select>
 <button id="memory-btn" class="toggle-btn" onclick="openMemoryModal()" title="Memory: what the AI remembers about you" aria-label="Memory">🧠</button>
+<button id="compare-btn" class="toggle-btn" onclick="openCompareModal()" title="Compare: ask the same question to two personas and see both answers">⚖️</button>
 <button id="settings-btn" class="toggle-btn" onclick="openSettingsModal()" title="Settings" aria-label="Settings">⚙️</button>
 </div>
 </header>
@@ -2337,6 +2362,56 @@ html.light .help-body a { color: #0369a1; }
 <input id="memory-input" class="auth-input" type="text" maxlength="200" placeholder="Example: I am a student in Casablanca" onkeydown="if(event.key==='Enter') addMemory()">
 <div id="memory-msg" style="font-size:0.8rem;color:#f87171;min-height:1em;"></div>
 <button id="memory-add" onclick="addMemory()">Add to memory</button>
+</div>
+</div>
+<div id="compare-modal" class="modal-overlay" onclick="if(event.target===this) closeCompareModal()">
+<div class="modal-content" style="max-width:900px;">
+<div class="modal-header">
+<div class="modal-title">⚖️ Compare two answers</div>
+<button class="toggle-btn" onclick="closeCompareModal()">✕</button>
+</div>
+<div style="font-size:0.85rem;color:#888;">Ask one question to two personas and read both answers side by side. Nothing is saved in your chats. Each answer counts as one message today.</div>
+<textarea id="cmp-q" maxlength="4000" placeholder="Type your question here..."></textarea>
+<div class="cmp-row">
+<select id="cmp-a" aria-label="First persona"></select>
+<span style="color:#888;">vs</span>
+<select id="cmp-b" aria-label="Second persona"></select>
+</div>
+<div id="cmp-msg" style="font-size:0.8rem;color:#f87171;min-height:1em;"></div>
+<button id="cmp-run" onclick="runCompare()" style="background:#fff;color:#000;border:none;border-radius:8px;padding:11px;font-weight:600;cursor:pointer;">Compare</button>
+<div id="cmp-out" class="cmp-grid" style="display:none;"></div>
+</div>
+</div>
+<div id="data-modal" class="modal-overlay" onclick="if(event.target===this) closeDataModal()">
+<div class="modal-content" style="max-width:520px;">
+<div class="modal-header">
+<div class="modal-title">🧹 Manage my data</div>
+<button class="toggle-btn" onclick="closeDataModal()">✕</button>
+</div>
+<div class="data-sec">
+<h4>Download everything</h4>
+<p>All your chats and messages, your memory and your name, in one JSON file. Attached pictures and files are not included, only their names.</p>
+<button id="data-download" class="data-btn" onclick="downloadAllData()">⬇ Download all my data</button>
+</div>
+<div class="data-sec">
+<h4>Delete old chats</h4>
+<p id="data-old-info"></p>
+<div class="cmp-row">
+<select id="data-days" class="set-select" onchange="updateDataInfo()" style="max-width:none;flex:1;">
+<option value="7">Older than 7 days</option>
+<option value="30" selected>Older than 30 days</option>
+<option value="90">Older than 90 days</option>
+<option value="180">Older than 180 days</option>
+</select>
+<button id="data-del-old" class="data-btn danger" onclick="deleteOldChats()">Delete them</button>
+</div>
+</div>
+<div class="data-sec">
+<h4>Delete all chats</h4>
+<p id="data-all-info"></p>
+<button id="data-del-all" class="data-btn danger" onclick="deleteAllChatsFromData()">Delete all my chats</button>
+</div>
+<div id="data-msg" style="font-size:0.85rem;color:#38bdf8;min-height:1.2em;"></div>
 </div>
 </div>
 <div id="drop-overlay">📎 Drop your files here</div>
@@ -2923,6 +2998,7 @@ const SHORTCUT_TITLES = {
   newChat: () => 'Start a new chat (' + MOD + ' + K)',
   input: () => 'Click here or press ' + MOD + ' + / to type. Enter = send, Shift + Enter = new line',
   attach: () => 'Attach files. You can also drag and drop them, or paste an image with ' + MOD + ' + V',
+  compare: () => 'Compare: ask the same question to two personas and see both answers',
   memory: () => 'Memory: what the AI remembers about you. Or write "Remember that..." in the chat',
   scroll: () => 'Scroll to the latest message',
   endCall: () => 'End the call (Esc)'
@@ -2934,11 +3010,193 @@ function applyShortcutTitles() {
   set('user-input', 'input');
   set('attach-btn', 'attach');
   set('memory-btn', 'memory');
+  set('compare-btn', 'compare');
   set('scroll-bottom-btn', 'scroll');
   const end = document.querySelector('.live-ctl.end');
   if (end) end.title = SHORTCUT_TITLES.endCall();
 }
 window.addEventListener('DOMContentLoaded', applyShortcutTitles);
+// ---- Compare two answers ----
+function openCompareModal() {
+  const src = document.getElementById('persona-select');
+  const a = document.getElementById('cmp-a');
+  const b = document.getElementById('cmp-b');
+  [a, b].forEach(sel => { sel.innerHTML = ''; });
+  const opts = Array.from(src.options).filter(o => o.value !== '__NEW__');
+  opts.forEach(o => {
+    [a, b].forEach(sel => {
+      const n = document.createElement('option');
+      n.value = o.value;
+      n.textContent = o.textContent;
+      sel.appendChild(n);
+    });
+  });
+  if (opts.some(o => o.value === src.value)) a.value = src.value;
+  const other = opts.find(o => o.value !== a.value);
+  if (other) b.value = other.value;
+  document.getElementById('cmp-msg').textContent = '';
+  document.getElementById('compare-modal').classList.add('open');
+  setTimeout(() => document.getElementById('cmp-q').focus(), 50);
+}
+function closeCompareModal() {
+  document.getElementById('compare-modal').classList.remove('open');
+}
+async function runCompare() {
+  const q = document.getElementById('cmp-q').value.trim();
+  const msg = document.getElementById('cmp-msg');
+  const out = document.getElementById('cmp-out');
+  const btn = document.getElementById('cmp-run');
+  if (!q) { msg.textContent = 'Type a question first.'; return; }
+  const selA = document.getElementById('cmp-a');
+  const selB = document.getElementById('cmp-b');
+  const nameA = selA.options[selA.selectedIndex].textContent;
+  const nameB = selB.options[selB.selectedIndex].textContent;
+  msg.textContent = '';
+  btn.disabled = true;
+  btn.textContent = 'Thinking...';
+  out.style.display = 'none';
+  try {
+    const r = await fetch('/api/compare', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ question: q, persona_a: selA.value, persona_b: selB.value })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { msg.textContent = d.detail || ('Error ' + r.status); return; }
+    out.innerHTML = '';
+    [['a', nameA], ['b', nameB]].forEach(([k, name]) => {
+      const col = document.createElement('div');
+      col.className = 'cmp-col';
+      const h = document.createElement('h4');
+      h.textContent = name;
+      const body = document.createElement('div');
+      body.className = 'cmp-body';
+      if (d[k]) body.innerHTML = safeParseMarkdown(d[k]);
+      else body.textContent = d[k + '_error'] || 'No answer.';
+      col.appendChild(h);
+      col.appendChild(body);
+      if (d[k]) {
+        const cp = document.createElement('button');
+        cp.className = 'action-btn';
+        cp.textContent = '📋 Copy';
+        cp.onclick = () => { try { navigator.clipboard.writeText(d[k]); } catch (e) {} cp.textContent = '✅ Copied'; setTimeout(() => cp.textContent = '📋 Copy', 1500); };
+        col.appendChild(cp);
+      }
+      out.appendChild(col);
+    });
+    out.style.display = '';
+    fetchQuota();
+  } catch (e) {
+    msg.textContent = 'Network error. Try again.';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Compare';
+  }
+}
+// ---- Manage my data: download everything, delete old chats, delete all ----
+function chatDate(c) { return new Date((c && (c.updated_at || c.created_at)) || 0).getTime() || 0; }
+function oldChatIds(days) {
+  const limit = Date.now() - days * 86400000;
+  return (chats || []).filter(c => chatDate(c) && chatDate(c) < limit).map(c => c.id);
+}
+function dataMsg(t) { const el = document.getElementById('data-msg'); if (el) el.textContent = t || ''; }
+function updateDataInfo() {
+  const days = parseInt(document.getElementById('data-days').value, 10) || 30;
+  const n = oldChatIds(days).length;
+  document.getElementById('data-old-info').textContent = n + ' chat' + (n === 1 ? '' : 's') + ' older than ' + days + ' days.';
+  document.getElementById('data-del-old').disabled = n === 0;
+  const total = (chats || []).length;
+  document.getElementById('data-all-info').textContent = 'You have ' + total + ' chat' + (total === 1 ? '' : 's') + '. This cannot be undone.';
+  document.getElementById('data-del-all').disabled = total === 0;
+}
+async function openDataModal() {
+  dataMsg('');
+  document.getElementById('data-modal').classList.add('open');
+  try {
+    const r = await fetch('/api/chats', { headers: getAuthHeaders() });
+    if (r.ok) { const d = await r.json(); if (Array.isArray(d)) chats = d; }
+  } catch (e) {}
+  updateDataInfo();
+}
+function closeDataModal() {
+  document.getElementById('data-modal').classList.remove('open');
+}
+function stripBig(v) {
+  if (Array.isArray(v)) return v.map(stripBig);
+  if (v && typeof v === 'object') {
+    const o = {};
+    Object.keys(v).forEach(k => { if (k === 'data') return; o[k] = stripBig(v[k]); });
+    return o;
+  }
+  return v;
+}
+async function downloadAllData() {
+  const btn = document.getElementById('data-download');
+  btn.disabled = true;
+  try {
+    const list = chats || [];
+    const out = { exported_at: new Date().toISOString(), email: authGet('supabase_email'), name: userName || '', memories: [], chats: [] };
+    try {
+      const mr = await fetch('/api/memory', { headers: getAuthHeaders() });
+      if (mr.ok) out.memories = ((await mr.json()).memories || []).map(m => m.text);
+    } catch (e) {}
+    for (let i = 0; i < list.length; i++) {
+      dataMsg('Downloading chat ' + (i + 1) + ' of ' + list.length + '...');
+      let msgs = [];
+      try {
+        const r = await fetch('/api/chats/' + encodeURIComponent(list[i].id) + '/messages', { headers: getAuthHeaders() });
+        if (r.ok) msgs = await r.json();
+      } catch (e) {}
+      out.chats.push({ id: list[i].id, title: list[i].title, created_at: list[i].created_at, updated_at: list[i].updated_at, messages: stripBig(msgs) });
+    }
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'my-data-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    dataMsg('Done: ' + list.length + ' chat' + (list.length === 1 ? '' : 's') + ' downloaded.');
+  } catch (e) {
+    dataMsg('Could not download. Try again.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function deleteChatsByIds(ids) {
+  let done = 0, failed = 0;
+  for (const id of ids) {
+    dataMsg('Deleting ' + (done + failed + 1) + ' of ' + ids.length + '...');
+    try {
+      const r = await fetch('/api/chats/' + encodeURIComponent(id), { method: 'DELETE', headers: getAuthHeaders() });
+      if (r.ok) { done++; chats = chats.filter(c => c.id !== id); } else { failed++; }
+    } catch (e) { failed++; }
+  }
+  if (!chats.length) {
+    await startNewChat();
+  } else if (!chats.some(c => c.id === currentChatId)) {
+    await loadChat(chats[0].id);
+  } else {
+    renderSidebar();
+  }
+  updateDataInfo();
+  dataMsg('Deleted ' + done + ' chat' + (done === 1 ? '' : 's') + (failed ? ' (' + failed + ' could not be deleted)' : '') + '.');
+}
+async function deleteOldChats() {
+  const days = parseInt(document.getElementById('data-days').value, 10) || 30;
+  const ids = oldChatIds(days);
+  if (!ids.length) return;
+  if (!confirm('Delete ' + ids.length + ' chat(s) older than ' + days + ' days? This cannot be undone.')) return;
+  await deleteChatsByIds(ids);
+}
+async function deleteAllChatsFromData() {
+  const ids = (chats || []).map(c => c.id);
+  if (!ids.length) return;
+  if (!confirm('Delete ALL ' + ids.length + ' chat(s)? This cannot be undone.')) return;
+  await deleteChatsByIds(ids);
+}
 // ---- Messages left today ----
 async function fetchQuota() {
   const el = document.getElementById('quota-note');
@@ -3954,6 +4212,19 @@ window.addEventListener('message', (ev) => {
     showCanvasError('⚠ Error in the preview: ' + ev.data.canvasError, ev.data.canvasError);
   }
 });
+function doubleCheckAnswer(msgDiv, text) {
+  if (isStreaming) return;
+  const box = document.getElementById('chat-box');
+  const all = box ? box.querySelectorAll('.message.model') : [];
+  const isLast = all.length && all[all.length - 1] === msgDiv;
+  const intro = isLast
+    ? 'Please double-check your last answer.'
+    : 'Please double-check this earlier answer of yours:\n---\n' + String(text).slice(0, 1500) + '\n---\n';
+  const input = document.getElementById('user-input');
+  if (!input) return;
+  input.value = intro + ' Re-read it carefully, then: (1) list any mistakes, wrong facts or things you are not sure about, (2) give a corrected version if something was wrong, (3) finish with a confidence level (Low, Medium or High) and one sentence explaining why. If it was correct, say so honestly.';
+  sendMessage();
+}
 function addMessageActions(msgDiv, text, metaObj) {
 const words = text.trim().split(/\s+/).filter(Boolean).length;
 const readTime = Math.max(1, Math.ceil(words / 200));
@@ -3973,6 +4244,12 @@ const metaInfo = document.createElement('span');
 metaInfo.className = 'msg-meta';
 metaInfo.innerText = `${words} words • ~${estTokens} tokens ($${estCost.toFixed(5)}) • ~${readTime} min read`;
 metaSpan.appendChild(copyBtn);
+const dcBtn = document.createElement('button');
+dcBtn.className = 'action-btn';
+dcBtn.innerText = '🔍 Double check';
+dcBtn.title = 'The AI re-reads this answer, looks for mistakes and says how sure it is';
+dcBtn.onclick = () => doubleCheckAnswer(msgDiv, text);
+metaSpan.appendChild(dcBtn);
 const arts = extractArtifacts(text);
 arts.forEach((a, i) => {
 const pb = document.createElement('button');
@@ -6075,6 +6352,87 @@ def enhance_prompt(
             user=user, model=MODEL_NAME, error=str(e),
         )
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _gemini_once(system_instruction: str, question: str) -> str:
+    """One plain (non-streaming) answer from Gemini."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+    if SDK_MODE == "NEW":
+        client = get_gemini_client(api_key)
+        res = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=question,
+            config=build_config(system_instruction, None, True),
+        )
+        return (res.text or "").strip()
+    genai_legacy.configure(api_key=api_key)
+    model = genai_legacy.GenerativeModel(MODEL_NAME, system_instruction=system_instruction)
+    return (model.generate_content(question).text or "").strip()
+
+
+@app.post("/api/compare")
+def compare_answers(
+    body: CompareRequest,
+    request: Request,
+    user: AuthUser = Depends(require_user),
+):
+    """Ask the same question to two personas at the same time and return both answers.
+    Nothing is saved in the chat. Each answer counts as one message of the daily limit."""
+    client_ip = get_client_ip(request)
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Too Many Requests. Please wait a moment.")
+    if not check_rate_limit(f"user:{user.id}", USER_RATE_LIMIT_PER_MIN):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many messages ({USER_RATE_LIMIT_PER_MIN} per minute). Please wait a moment.",
+        )
+    if not check_daily_quota(user):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Daily limit reached ({DAILY_REQUEST_LIMIT} messages per day). Try again tomorrow.",
+        )
+    if not check_monthly_budget(user):
+        raise HTTPException(
+            status_code=429,
+            detail="You have used your monthly allowance. It resets at the start of next month.",
+        )
+    question = body.question.strip()[:4000]
+    if not question:
+        return JSONResponse({"detail": "Type a question first."}, status_code=400)
+    ctx = ""
+    try:
+        ctx = build_user_context(user)
+    except Exception:
+        pass
+    personas = [
+        (body.persona_a or "You are a helpful assistant.")[:4000] + ctx,
+        (body.persona_b or "You are a helpful assistant.")[:4000] + ctx,
+    ]
+
+    def run(sysi: str):
+        t0 = time.time()
+        try:
+            return _gemini_once(sysi, question), None, (time.time() - t0) * 1000
+        except Exception as e:
+            print(f"compare error: {e}")
+            return None, "The AI could not answer this one. Try again.", (time.time() - t0) * 1000
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        results = list(ex.map(run, personas))
+
+    out: Dict[str, Any] = {}
+    for key, sysi, (text, err, ms) in zip(("a", "b"), personas, results):
+        # Logged as /api/chat so the daily limit and monthly budget count both answers.
+        log_analytics_entry(
+            "/api/chat", 200 if text else 500, ms,
+            estimate_tokens(question) + estimate_tokens(sysi), estimate_tokens(text or ""),
+            client_ip, user=user, model=MODEL_NAME, error=err,
+        )
+        out[key] = text
+        out[key + "_error"] = err
+    return JSONResponse(out)
 
 
 def build_config(system_instruction: str, tools, use_thinking: bool):
