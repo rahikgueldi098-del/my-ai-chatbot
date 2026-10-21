@@ -291,6 +291,16 @@ class ChatRequest(BaseModel):
     web_search: bool = False
     # Pillar 4: Gemini writes AND runs Python (in Google's sandbox) to answer.
     code_execution: bool = False
+    # Temporary chat: nothing is saved (no messages, no documents, no memory).
+    temporary: bool = False
+
+
+TEMP_HINT = (
+    "\n\nThis is a TEMPORARY chat: nothing in it is saved to the user's history or to"
+    " memory. If the user asks you to remember something, say in one short sentence that"
+    " this is a temporary chat, so it will not be remembered, and that a normal chat can"
+    " be used for that."
+)
 
 
 # --- Rate Limiting & Analytics ---
@@ -1436,6 +1446,8 @@ def _tool_get_current_datetime(args: dict, ctx: dict) -> dict:
 
 
 def _tool_search_my_chats(args: dict, ctx: dict) -> dict:
+    if ctx.get("temporary"):
+        return {"matches": [], "note": "Past chats are not used in a temporary chat."}
     q = str(args.get("query", "")).strip()[:100]
     if not q:
         return {"error": "query is required."}
@@ -2274,12 +2286,25 @@ html.light .help-body a { color: #0369a1; }
 }
 html.light .welcome-chips .chip { background: #f0f0f4; border-color: #dcdce2; color: #111; }
 html.light #input-container { background: #f4f4f7; border-color: #dcdce2; }
+/* ===== Temporary chat ===== */
+#temp-btn { display: none; }
+#temp-chat-btn { background: transparent; color: #c4b5fd; border: 1px dashed #4c3a8a; border-radius: 8px; padding: 9px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+#temp-chat-btn:hover, body.temp-mode #temp-chat-btn { background: #251d3f; }
+.toggle-btn.temp-on { background: #251d3f; color: #c4b5fd; border-color: #6d4fd8; }
+#temp-banner { display: none; align-self: center; width: calc(100% - 24px); max-width: 776px; margin: 8px 12px 0; padding: 8px 14px; font-size: 0.82rem; line-height: 1.4; text-align: center; color: #c4b5fd; background: #251d3f; border: 1px solid #4c3a8a; border-radius: 10px; }
+body.temp-mode #temp-banner { display: block; }
+@media (max-width: 768px) { #temp-btn { display: inline-block; } }
+html.light #temp-chat-btn { color: #6d28d9; border-color: #a78bfa; }
+html.light #temp-chat-btn:hover, html.light body.temp-mode #temp-chat-btn { background: #ede9fe; }
+html.light .toggle-btn.temp-on { background: #ede9fe; color: #6d28d9; border-color: #a78bfa; }
+html.light #temp-banner { background: #ede9fe; color: #5b21b6; border-color: #c4b5fd; }
 </style>
 </head>
 <body>
 <div id="sidebar-backdrop" onclick="toggleSidebar()"></div>
 <div id="sidebar">
 <button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
+<button id="temp-chat-btn" onclick="toggleTempChat()" title="A chat that is not saved in your history">👻 Temporary chat</button>
 <input type="text" id="chat-search" name="q-chat-filter-x" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" data-lpignore="true" data-1p-ignore data-form-type="other" placeholder="Search chats..." oninput="onChatSearchInput(event)">
 <div id="history-list"></div>
 <div class="export-box">
@@ -2303,6 +2328,7 @@ html.light #input-container { background: #f4f4f7; border-color: #dcdce2; }
 <span>NOVA AI</span>
 </div>
 <div class="header-controls">
+<button id="temp-btn" class="toggle-btn" onclick="toggleTempChat()" title="Temporary chat: not saved in your history">👻 Temporary</button>
 <button id="analytics-btn" class="admin-btn" style="display:none;" onclick="openAnalyticsModal()">📊 Analytics</button>
 <button id="docs-btn" class="toggle-btn" onclick="openDocsModal()" title="Documents indexed in this chat">📚 Documents</button>
 <button id="search-toggle" class="toggle-btn" onclick="toggleSearch()">Web Search: OFF</button>
@@ -2319,6 +2345,7 @@ html.light #input-container { background: #f4f4f7; border-color: #dcdce2; }
 <button id="settings-btn" class="toggle-btn" onclick="openSettingsModal()" title="Settings" aria-label="Settings">⚙️</button>
 </div>
 </header>
+<div id="temp-banner">👻 Temporary chat · not saved to your history · the AI won't remember it · gone when you leave</div>
 <div id="chat-box"></div>
 <div id="input-wrapper">
 <div class="chips-row">
@@ -3443,8 +3470,14 @@ function showWelcome(box) {
   d.className = 'welcome-msg';
   const t = document.createElement('div');
   t.className = 'welcome-title';
-  t.textContent = pickWelcome();
+  t.textContent = tempChat ? 'Temporary chat' : pickWelcome();
   d.appendChild(t);
+  if (tempChat) {
+    const ts = document.createElement('div');
+    ts.className = 'welcome-sub';
+    ts.textContent = "This chat won't appear in your history and the AI won't remember it. It is gone when you leave.";
+    d.appendChild(ts);
+  }
   const row = document.createElement('div');
   row.className = 'welcome-chips';
   const _isMobile = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
@@ -3699,7 +3732,43 @@ function closeSidebarOnMobile() {
 document.getElementById('sidebar').classList.remove('open');
 document.getElementById('sidebar-backdrop').classList.remove('show');
 }
+let tempChat = false;
+function updateTempUI() {
+  document.body.classList.toggle('temp-mode', tempChat);
+  const hb = document.getElementById('temp-btn');
+  if (hb) { hb.className = tempChat ? 'toggle-btn temp-on' : 'toggle-btn'; hb.textContent = tempChat ? '👻 Temporary: ON' : '👻 Temporary'; }
+  const sb = document.getElementById('temp-chat-btn');
+  if (sb) sb.textContent = tempChat ? '↩ Back to normal chat' : '👻 Temporary chat';
+}
+async function leaveTempChat() {
+  if (!tempChat) return true;
+  if (isStreaming) { alert('Wait for the current answer to finish (or press Stop) first.'); return false; }
+  if (currentHistory.length && !confirm('Leave this temporary chat? Its messages will be gone for good.')) return false;
+  tempChat = false;
+  updateTempUI();
+  return true;
+}
+async function toggleTempChat() {
+  if (tempChat) {
+    if (!(await leaveTempChat())) return;
+    if (chats.length) await loadChat(chats[0].id); else await startNewChat();
+    return;
+  }
+  if (isStreaming) { alert('Wait for the current answer to finish (or press Stop) first.'); return; }
+  if (typeof LIVE !== 'undefined' && LIVE.active) return;
+  tempChat = true;
+  currentChatId = null;
+  currentHistory = [];
+  currentDocs = [];
+  updateDocsButton();
+  clearFile();
+  updateTempUI();
+  renderSidebar();
+  renderChatBox();
+  closeSidebarOnMobile();
+}
 async function startNewChat() {
+if (!(await leaveTempChat())) return;
 try {
 const res = await fetch('/api/chats', {
 method: 'POST',
@@ -3720,6 +3789,7 @@ console.error("Failed to start new chat:", e);
 }
 }
 async function loadChat(id) {
+if (!(await leaveTempChat())) return;
 currentChatId = id;
 try {
 const res = await fetch(`/api/chats/${id}/messages`, { headers: getAuthHeaders() });
@@ -4720,7 +4790,11 @@ const imgs = selectedImages.slice();
 if (!text && !selectedFile && !multi.length && !imgs.length) return;
 if (!text && multi.length) text = 'Please summarize the attached files.';
 if (!text && imgs.length) text = 'Please describe the attached images.';
-if (!currentChatId) {
+if (tempChat && multi.length) {
+alert('In a temporary chat you can attach one file under 2.5 MB, or pictures. Bigger files and several documents need a normal chat, because they are stored so the AI can search them.');
+return;
+}
+if (!currentChatId && !tempChat) {
 await startNewChat();
 }
 const filePayload = selectedFile;
@@ -4791,6 +4865,7 @@ headers: getAuthHeaders(),
 signal: activeAbortController.signal,
 body: JSON.stringify({
 chat_id: currentChatId,
+temporary: tempChat,
 history: buildHistoryForApi(),
 message: text,
 file: filePayload,
@@ -5105,6 +5180,7 @@ if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !(window.
 alert('Live voice is not supported in this browser. Try a recent Chrome, Edge, Safari or Firefox over HTTPS.');
 return;
 }
+if (tempChat) { alert('Live voice conversations are saved in your history, so they are not available in a temporary chat. Switch back to a normal chat to use them.'); return; }
 if (!currentChatId) await startNewChat();
 try { const v = localStorage.getItem('live_voice'); if (v) document.getElementById('live-voice').value = v; } catch (e) {}
 Object.assign(LIVE, {
@@ -6261,7 +6337,7 @@ def maybe_remember(user: AuthUser, message: str) -> Optional[str]:
     return item["text"] if item else None
 
 
-def build_user_context(user: AuthUser, just_saved: Optional[str] = None) -> str:
+def build_user_context(user: AuthUser, just_saved: Optional[str] = None, include_memories: bool = True) -> str:
     """Text added to the AI's instructions: the user's name and remembered facts."""
     parts: List[str] = []
     name = " ".join(str(user.meta.get("display_name") or "").split())[:40]
@@ -6270,7 +6346,7 @@ def build_user_context(user: AuthUser, just_saved: Optional[str] = None) -> str:
             f"The user's name is {name}. Use it naturally from time to time "
             "(for example in a greeting), not in every message."
         )
-    mems = [m["text"] for m in _clean_memories(user.meta)]
+    mems = [m["text"] for m in _clean_memories(user.meta)] if include_memories else []
     if mems:
         parts.append(
             "Facts the user asked you to remember. Use them only when they are relevant, "
@@ -6683,7 +6759,10 @@ def chat_endpoint(
         )
 
     try:
-        chat_id = body.chat_id
+        temporary = bool(body.temporary)
+        # Temporary chat: with no chat_id nothing is written to the messages /
+        # documents tables and no document is indexed.
+        chat_id = None if temporary else body.chat_id
         message = body.message
         # Only keep the most recent messages -> much faster on long chats.
         raw_history = list(body.history or [])
@@ -6702,7 +6781,12 @@ def chat_endpoint(
             body.system_instruction or "You are a helpful assistant."
         ) + CANVAS_HINT
         try:
-            system_instruction += build_user_context(user, maybe_remember(user, message))
+            if temporary:
+                # No memory is read or written in a temporary chat (only the name is used).
+                system_instruction += build_user_context(user, None, include_memories=False)
+                system_instruction += TEMP_HINT
+            else:
+                system_instruction += build_user_context(user, maybe_remember(user, message))
         except Exception as e:
             print(f"user context error: {e}")
         web_search = body.web_search
@@ -6747,7 +6831,7 @@ def chat_endpoint(
                         + str(ex)[:200]
                         + ". Tell them briefly."
                     )
-        if body.attached:
+        if body.attached and not temporary:
             # Several files were indexed one by one beforehand: keep only labels.
             saved_file_payload = {
                 "multi": [
@@ -6881,7 +6965,7 @@ def chat_endpoint(
                 )
             tool_ctx = {
                 "user": user, "chat_id": chat_id, "start": start_time,
-                "client": client, "client_ip": client_ip,
+                "client": client, "client_ip": client_ip, "temporary": temporary,
             }
 
             def make_stream():
