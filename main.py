@@ -2222,50 +2222,58 @@ html.light .remember-row { color: #555; }
 html.light .help-search { background: #fff; color: #1f2328; border-color: #d4d4da; }
 html.light .help-body { color: #555; }
 html.light .help-body a { color: #0369a1; }
-/* ===== Mobile : suggestions en carrousel swipable ===== */
+/* ===== Mobile : look "ChatGPT" (suggestions en roue verticale, barre compacte, zone de saisie en pilule) ===== */
 .chip .chip-t { display: inline; }
 .chip .chip-s { display: none; }
 @media (max-width: 768px) {
+  /* --- En-tête : une seule ligne, les boutons se swipent --- */
+  header { flex-wrap: nowrap; padding: 8px 10px; border-bottom: none; background: transparent; gap: 8px; }
+  .header-left { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  #menu-btn { width: 40px; height: 40px; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  .header-controls { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; gap: 6px; padding: 2px 0; }
+  .header-controls::-webkit-scrollbar { display: none; }
+  .header-controls > * { flex-shrink: 0; }
+  .toggle-btn, .admin-btn { white-space: nowrap; border-radius: 999px; padding: 8px 12px; }
+
+  /* --- Écran de bienvenue : titre à gauche + roue de suggestions verticale --- */
+  .welcome-msg { width: 100%; min-width: 0; margin: auto 0 0; padding: 0 4px 6px; text-align: left; }
+  .welcome-msg .welcome-title { font-size: 1.75rem; font-weight: 500; line-height: 1.25; }
   .welcome-chips {
-    flex-wrap: nowrap;
-    justify-content: flex-start;
-    overflow-x: auto;
-    scroll-snap-type: x mandatory;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
-    scrollbar-width: none;
-    gap: 10px;
-    margin: 18px -12px 0;
-    padding: 4px 16px 8px;
-    scroll-padding: 0 16px;
+    flex-direction: column; flex-wrap: nowrap; align-items: flex-start; justify-content: flex-start;
+    gap: 10px; margin: 6px 0 0; max-width: 100%;
+    max-height: 250px; padding: 44px 0;
+    overflow-y: auto; overflow-x: hidden;
+    scroll-snap-type: y mandatory; scroll-padding: 44px 0;
+    -webkit-overflow-scrolling: touch; overscroll-behavior: contain; scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 40px, #000 calc(100% - 40px), transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 40px, #000 calc(100% - 40px), transparent 100%);
   }
   .welcome-chips::-webkit-scrollbar { display: none; }
   .welcome-chips .chip {
-    flex: 0 0 72%;
-    max-width: 280px;
-    scroll-snap-align: start;
-    white-space: normal;
-    text-align: left;
-    border-radius: 16px;
-    padding: 14px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex: 0 0 auto; max-width: 100%; scroll-snap-align: start;
+    background: #2a2a2a; border: 1px solid #333; color: #ececec;
+    border-radius: 999px; padding: 12px 18px; font-size: 1rem; text-align: left;
+    white-space: normal; display: block;
   }
-  .welcome-chips .chip .chip-t { font-weight: 600; color: #ececec; font-size: 0.95rem; }
-  .welcome-chips .chip .chip-s { display: block; font-size: 0.8rem; color: #888; line-height: 1.35; }
-  .chips-row {
-    scroll-snap-type: x proximity;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior-x: contain;
-    margin: 0 -10px;
-    padding: 0 10px 4px;
+
+  /* --- Zone de saisie : une pilule (texte en haut, boutons en bas) --- */
+  .chips-row, .quota-note:empty { display: none; }
+  #input-wrapper { padding: 6px 10px 10px; gap: 6px; }
+  #input-container {
+    display: grid; grid-template-columns: auto auto 1fr auto auto auto;
+    grid-template-areas: "ta ta ta ta ta ta" "att enh . mic live send";
+    gap: 2px 4px; align-items: center;
+    background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 26px; padding: 10px 10px 8px;
   }
-  .chips-row::-webkit-scrollbar { display: none; }
-  .chips-row .chip { scroll-snap-align: start; padding: 8px 14px; font-size: 0.85rem; }
+  #user-input { grid-area: ta; border: none; background: transparent; padding: 4px 8px; min-height: 28px; max-height: 140px; border-radius: 0; }
+  #attach-btn { grid-area: att; } #enhance-btn { grid-area: enh; }
+  #mic-btn { grid-area: mic; } #live-btn { grid-area: live; } #send-btn { grid-area: send; }
+  #input-container .icon-btn { width: 38px; height: 38px; border: none; background: transparent; font-size: 1.15rem; }
+  #send-btn { height: 38px; min-width: 38px; padding: 0 16px; border-radius: 19px; margin-left: 2px; }
+  .legal-note { font-size: 0.66rem; line-height: 1.3; padding: 0 6px; }
 }
-html.light .welcome-chips .chip .chip-t { color: #111; }
-html.light .welcome-chips .chip .chip-s { color: #666; }
+html.light .welcome-chips .chip { background: #f0f0f4; border-color: #dcdce2; color: #111; }
+html.light #input-container { background: #f4f4f7; border-color: #dcdce2; }
 </style>
 </head>
 <body>
@@ -3417,6 +3425,12 @@ const WELCOME_SUGGESTIONS = [
   { label: '🌐 Translate a text', sub: 'Into English, French, Arabic…', text: 'Translate the following text to English: ' },
   { label: '💡 Give me project ideas', sub: 'Five ideas to get you started', text: 'Give me 5 project ideas about: ' }
 ];
+const MOBILE_EXTRA_SUGGESTIONS = [
+  { label: '📝 Summarize', text: 'Summarize this context clearly: ' },
+  { label: '🐛 Fix code', text: 'Find bugs and fix this code: ' },
+  { label: '💡 Brainstorm', text: 'Brainstorm creative ideas for: ' },
+  { label: '🔍 Explain simply', text: 'Explain this concept in simple terms suitable for a beginner: ' }
+];
 function fillInput(text) {
   const input = document.getElementById('user-input');
   if (!input) return;
@@ -3433,7 +3447,8 @@ function showWelcome(box) {
   d.appendChild(t);
   const row = document.createElement('div');
   row.className = 'welcome-chips';
-  WELCOME_SUGGESTIONS.forEach(s => {
+  const _isMobile = window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+  (_isMobile ? WELCOME_SUGGESTIONS.concat(MOBILE_EXTRA_SUGGESTIONS) : WELCOME_SUGGESTIONS).forEach(s => {
     const b = document.createElement('button');
     b.className = 'chip';
     const t = document.createElement('span');
