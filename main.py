@@ -6734,6 +6734,21 @@ def _parse_json_loose(text: str) -> Any:
 
 
 AUTO_MEMORY_TIMEOUT_SEC = float(os.environ.get("AUTO_MEMORY_TIMEOUT_SEC", "25"))
+# Optional: use a different (lighter) model for memory so it has its own quota.
+AUTO_MEMORY_MODEL = os.environ.get("AUTO_MEMORY_MODEL", "").replace("models/", "").strip()
+
+# Saves quota: the memory call only runs when the message sounds personal
+# (I / my / je / j' / mon ... or Arabic). Code requests and general questions skip it.
+_PERSONAL_RE = re.compile(
+    r"\bi\b|\bi['\u2019](?:m|ve|d|ll)\b|\bmy\b|\bmyself\b|\bje\b|\bj['\u2019]|\bmon\b|\bma\b|\bmes\b|\bmoi\b",
+    re.I,
+)
+_PERSONAL_AR = ("أنا", "انا", "عندي", "اسمي", "أدرس", "ادرس", "أعمل", "اعمل", "أسكن", "اسكن",
+                "أحب", "احب", "مشروعي", "دراستي", "عملي", "أتكلم", "اتكلم", "أعيش", "اعيش", "عمري", "أفضل", "افضل")
+
+
+def looks_personal(message: str) -> bool:
+    return bool(_PERSONAL_RE.search(message)) or any(w in message for w in _PERSONAL_AR)
 _learn_pool = ThreadPoolExecutor(max_workers=4)  # separate pool: a slow call never blocks saving chats
 
 
@@ -6770,6 +6785,8 @@ def learn_from_turn(user: AuthUser, message: str, reply: str, client_ip: str) ->
     message = (message or "").strip()
     if len(message) < AUTO_MEMORY_MIN_CHARS or _REMEMBER_RE.match(message):
         return []  # too short, or an explicit "remember that ..." (already handled)
+    if not looks_personal(message):
+        return []  # nothing about the user in it: skip the call (saves your daily quota)
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return []
@@ -6785,8 +6802,9 @@ def learn_from_turn(user: AuthUser, message: str, reply: str, client_ip: str) ->
     )
     started = time.time()
     client = get_gemini_client(api_key)
-    models = [MODEL_NAME] + ([FALLBACK_MODEL] if FALLBACK_MODEL and FALLBACK_MODEL != MODEL_NAME else [])
-    data, p_tok, c_tok, used_model, last_err = None, 0, 0, MODEL_NAME, None
+    first_model = AUTO_MEMORY_MODEL or MODEL_NAME
+    models = [first_model] + ([FALLBACK_MODEL] if FALLBACK_MODEL and FALLBACK_MODEL != first_model else [])
+    data, p_tok, c_tok, used_model, last_err = None, 0, 0, first_model, None
     for mdl in models:
         fut = _learn_pool.submit(_ask_memory_model, client, payload, mdl)
         try:
