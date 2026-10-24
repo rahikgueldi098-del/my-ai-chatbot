@@ -7396,7 +7396,7 @@ def chat_endpoint(
         }
 
         # `state` lets the retry loop switch thinking off if the model rejects it.
-        state = {"use_thinking": True, "model": MODEL_NAME, "timeout": None}
+        state = {"use_thinking": True, "model": MODEL_NAME, "timeout": None, "plain": False}
         usage: Dict[str, int] = {}
 
         if SDK_MODE == "NEW":
@@ -7472,6 +7472,19 @@ def chat_endpoint(
                 model_now = state["model"]
 
                 def gen():
+                    if state["plain"]:
+                        # Last resort after a 400 error: some models reject the tool definitions.
+                        plain_cfg = build_config(
+                            system_instruction + "\nNo tools are available right now: answer directly.",
+                            None, state["use_thinking"],
+                        )
+                        for chunk in client.models.generate_content_stream(
+                            model=model_now, contents=contents, config=plain_cfg
+                        ):
+                            _capture_usage(chunk, local_usage)
+                            if chunk.text:
+                                yield chunk.text
+                        return
                     if code_exec:
                         yield from stream_code_execution(
                             client, model_now, contents, system_instruction,
@@ -7544,8 +7557,14 @@ def chat_endpoint(
         def generate():
             total_output_text = ""
             use_fallback = bool(FALLBACK_MODEL) and SDK_MODE == "NEW" and FALLBACK_MODEL != MODEL_NAME
-            total_attempts = MAX_RETRIES + (1 if use_fallback else 0)
-            for attempt in range(total_attempts):
+            base_attempts = MAX_RETRIES + (1 if use_fallback else 0)
+            extra = 0  # +1 for each "simplify the request" retry after a 400 error
+            attempt = -1
+            while True:
+                attempt += 1
+                total_attempts = base_attempts + extra
+                if attempt >= total_attempts:
+                    return
                 last_attempt = attempt == total_attempts - 1
                 # Every attempt except the last one gives up if the model stays silent.
                 state["timeout"] = None if (last_attempt or not FIRST_TOKEN_TIMEOUT_SEC) else FIRST_TOKEN_TIMEOUT_SEC
@@ -7581,13 +7600,22 @@ def chat_endpoint(
                 except Exception as ex:
                     err_msg = str(ex)
 
-                    # Model refused the "thinking" option -> retry without it.
+                    # 400 INVALID_ARGUMENT: this model rejected something in the request.
+                    # Simplify step by step: first without "thinking", then without tools.
+                    bad_request = "400" in err_msg and "INVALID_ARGUMENT" in err_msg
                     if (
                         state["use_thinking"]
-                        and "thinking" in err_msg.lower()
+                        and ("thinking" in err_msg.lower() or bad_request)
                         and not total_output_text
                     ):
+                        print(f"[retry] {state['model']} rejected the request -> without thinking: {err_msg[:120]}")
                         state["use_thinking"] = False
+                        extra += 1
+                        continue
+                    if bad_request and not state["plain"] and not total_output_text:
+                        print(f"[retry] {state['model']} still rejects the request -> without tools: {err_msg[:120]}")
+                        state["plain"] = True
+                        extra += 1
                         continue
 
                     # Overloaded (503), rate limited (429) or too slow: retry only if nothing
@@ -7612,7 +7640,7 @@ def chat_endpoint(
                         "/api/chat", status_code, latency_ms, 0, 0, client_ip,
                         user=user, model=state["model"], error=err_msg,
                     )
-                    yield f"\n\n⚠️ Error: {err_msg}"
+                    yield f"\n\n⚠️ Error: {err_msg}\n\n(model: {state['model']})"
                     return
 
         return StreamingResponse(
