@@ -3,6 +3,7 @@ import collections
 import io
 import json
 import os
+import queue
 import re
 import threading
 import time
@@ -38,6 +39,13 @@ MAX_RETRIES = 2
 USER_RATE_LIMIT_PER_MIN = int(os.environ.get("USER_RATE_LIMIT_PER_MIN", "20"))
 DAILY_REQUEST_LIMIT = int(os.environ.get("DAILY_REQUEST_LIMIT", "200"))  # 0 = unlimited
 RETRY_BACKOFF_SEC = 1.0
+# --- Overload protection (Vercel -> Environment Variables) ---
+# GEMINI_FALLBACK_MODEL: backup model used when the main one answers 503/429 or is too slow.
+#   Leave empty to disable the backup model.
+# FIRST_TOKEN_TIMEOUT_SEC: if the model shows nothing after this many seconds, switch to the
+#   backup (or retry). The LAST attempt never times out. 0 = off.
+FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "").replace("models/", "").strip()
+FIRST_TOKEN_TIMEOUT_SEC = float(os.environ.get("FIRST_TOKEN_TIMEOUT_SEC", "25"))
 
 # --- RAG (Pillar 2: semantic search over attached documents) ---
 # RAG needs the NEW google-genai SDK (embeddings API). With the legacy SDK it
@@ -118,6 +126,48 @@ def get_gemini_client(api_key: str):
         _gemini_client = genai.Client(api_key=api_key)
         _gemini_client_key = api_key
     return _gemini_client
+
+
+class FirstTokenTimeout(Exception):
+    """The model showed nothing within FIRST_TOKEN_TIMEOUT_SEC."""
+
+
+def guard_first_token(make_gen, timeout):
+    """Run make_gen() in a helper thread. If it yields nothing within `timeout` seconds,
+    raise FirstTokenTimeout (the slow call is abandoned). After the first item there is no limit."""
+    if not timeout:
+        yield from make_gen()
+        return
+    q: "queue.Queue" = queue.Queue()
+    stop = threading.Event()
+
+    def worker():
+        try:
+            for item in make_gen():
+                if stop.is_set():
+                    return
+                q.put(("item", item))
+            q.put(("end", None))
+        except BaseException as e:  # passed to the caller below
+            q.put(("err", e))
+
+    threading.Thread(target=worker, daemon=True).start()
+    wait: Optional[float] = timeout
+    try:
+        while True:
+            try:
+                kind, val = q.get(timeout=wait)
+            except queue.Empty:
+                raise FirstTokenTimeout(f"The model did not answer within {timeout:g}s")
+            wait = None
+            if kind == "item":
+                yield val
+            elif kind == "end":
+                return
+            else:
+                raise val
+    finally:
+        stop.set()
 
 
 # --- Authentication (Supabase Auth) ---
@@ -3554,6 +3604,7 @@ function showNovaToast(html, onClick) {
 async function learnFromTurn(userText, replyText) {
   if (tempChat || !autoMemoryOn) return;
   if (!userText || userText.trim().length < 12) return;
+  if ((replyText || '').includes('⚠️ Error:')) return;  // the answer failed: nothing to learn from
   if (userText === 'Please summarize the attached files.' || userText === 'Please describe the attached images.') return;
   try {
     const r = await fetch('/api/memory/learn', {
@@ -6682,7 +6733,11 @@ def _parse_json_loose(text: str) -> Any:
     return None
 
 
-def _ask_memory_model(client, payload: str):
+AUTO_MEMORY_TIMEOUT_SEC = float(os.environ.get("AUTO_MEMORY_TIMEOUT_SEC", "25"))
+_learn_pool = ThreadPoolExecutor(max_workers=4)  # separate pool: a slow call never blocks saving chats
+
+
+def _ask_memory_model(client, payload: str, model_name: Optional[str] = None):
     """Returns (parsed_json_or_None, prompt_tokens, completion_tokens)."""
     last_err = None
     for use_thinking in (True, False):
@@ -6695,7 +6750,7 @@ def _ask_memory_model(client, payload: str):
             if use_thinking:
                 kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
             res = client.models.generate_content(
-                model=MODEL_NAME,
+                model=model_name or MODEL_NAME,
                 contents=payload,
                 config=types.GenerateContentConfig(**kwargs),
             )
@@ -6729,17 +6784,27 @@ def learn_from_turn(user: AuthUser, message: str, reply: str, client_ip: str) ->
         ensure_ascii=False,
     )
     started = time.time()
-    try:
-        data, p_tok, c_tok = _ask_memory_model(get_gemini_client(api_key), payload)
-    except Exception as e:
+    client = get_gemini_client(api_key)
+    models = [MODEL_NAME] + ([FALLBACK_MODEL] if FALLBACK_MODEL and FALLBACK_MODEL != MODEL_NAME else [])
+    data, p_tok, c_tok, used_model, last_err = None, 0, 0, MODEL_NAME, None
+    for mdl in models:
+        fut = _learn_pool.submit(_ask_memory_model, client, payload, mdl)
+        try:
+            # a slow or overloaded model is skipped after AUTO_MEMORY_TIMEOUT_SEC
+            data, p_tok, c_tok = fut.result(timeout=AUTO_MEMORY_TIMEOUT_SEC or None)
+            used_model, last_err = mdl, None
+            break
+        except Exception as e:
+            last_err = e if str(e) else TimeoutError("memory call timed out")
+    if last_err is not None:
         log_analytics_entry(
             "/api/memory/learn", 500, (time.time() - started) * 1000, 0, 0, client_ip,
-            user=user, model=MODEL_NAME, error=str(e),
+            user=user, model=models[-1], error=str(last_err) or "timeout",
         )
         return []
     log_analytics_entry(
         "/api/memory/learn", 200, (time.time() - started) * 1000, p_tok, c_tok, client_ip,
-        user=user, model=MODEL_NAME,
+        user=user, model=used_model,
     )
 
     adds = data.get("add") if isinstance(data, dict) else None
@@ -7313,7 +7378,7 @@ def chat_endpoint(
         }
 
         # `state` lets the retry loop switch thinking off if the model rejects it.
-        state = {"use_thinking": True}
+        state = {"use_thinking": True, "model": MODEL_NAME, "timeout": None}
         usage: Dict[str, int] = {}
 
         if SDK_MODE == "NEW":
@@ -7385,28 +7450,37 @@ def chat_endpoint(
 
             def make_stream():
                 usage.clear()
-                if code_exec:
-                    yield from stream_code_execution(
-                        client, MODEL_NAME, contents, system_instruction,
-                        usage, state, build_config,
+                local_usage: Dict[str, int] = {}  # own dict: an abandoned slow call can't pollute the next try
+                model_now = state["model"]
+
+                def gen():
+                    if code_exec:
+                        yield from stream_code_execution(
+                            client, model_now, contents, system_instruction,
+                            local_usage, state, build_config,
+                        )
+                        return
+                    if fn_tools:
+                        yield from stream_with_tools(
+                            client, model_now, contents, system_instruction, tools,
+                            tool_ctx, local_usage, state, build_config,
+                        )
+                        return
+                    config = build_config(
+                        system_instruction, tools, state["use_thinking"]
                     )
-                    return
-                if fn_tools:
-                    yield from stream_with_tools(
-                        client, MODEL_NAME, contents, system_instruction, tools,
-                        tool_ctx, usage, state, build_config,
+                    response = client.models.generate_content_stream(
+                        model=model_now, contents=contents, config=config
                     )
-                    return
-                config = build_config(
-                    system_instruction, tools, state["use_thinking"]
-                )
-                response = client.models.generate_content_stream(
-                    model=MODEL_NAME, contents=contents, config=config
-                )
-                for chunk in response:
-                    _capture_usage(chunk, usage)
-                    if chunk.text:
-                        yield chunk.text
+                    for chunk in response:
+                        _capture_usage(chunk, local_usage)
+                        if chunk.text:
+                            yield chunk.text
+
+                try:
+                    yield from guard_first_token(gen, state["timeout"])
+                finally:
+                    usage.update(local_usage)
 
         else:
             genai_legacy.configure(api_key=api_key)
@@ -7451,7 +7525,12 @@ def chat_endpoint(
 
         def generate():
             total_output_text = ""
-            for attempt in range(MAX_RETRIES):
+            use_fallback = bool(FALLBACK_MODEL) and SDK_MODE == "NEW" and FALLBACK_MODEL != MODEL_NAME
+            total_attempts = MAX_RETRIES + (1 if use_fallback else 0)
+            for attempt in range(total_attempts):
+                last_attempt = attempt == total_attempts - 1
+                # Every attempt except the last one gives up if the model stays silent.
+                state["timeout"] = None if (last_attempt or not FIRST_TOKEN_TIMEOUT_SEC) else FIRST_TOKEN_TIMEOUT_SEC
                 try:
                     for text in make_stream():
                         if not isinstance(text, ToolNote):
@@ -7468,7 +7547,7 @@ def chat_endpoint(
                         usage.get("c") or estimate_tokens(total_output_text),
                         client_ip,
                         user=user,
-                        model=MODEL_NAME,
+                        model=state["model"],
                     )
                     if chat_id and total_output_text:
                         # Keep order: user message first, then the answer.
@@ -7493,20 +7572,27 @@ def chat_endpoint(
                         state["use_thinking"] = False
                         continue
 
-                    # Retry only if nothing was sent yet (no duplicated text).
+                    # Overloaded (503), rate limited (429) or too slow: retry only if nothing
+                    # was sent yet (no duplicated text).
+                    too_slow = isinstance(ex, FirstTokenTimeout)
                     if (
-                        ("429" in err_msg or "503" in err_msg)
+                        (too_slow or "429" in err_msg or "503" in err_msg)
                         and not total_output_text
-                        and attempt < (MAX_RETRIES - 1)
+                        and not last_attempt
                     ):
-                        time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
+                        if use_fallback and state["model"] != FALLBACK_MODEL:
+                            print(f"[fallback] {state['model']} -> {FALLBACK_MODEL}: {err_msg[:120]}")
+                            state["model"] = FALLBACK_MODEL
+                            continue  # switch at once, no waiting
+                        if not too_slow:
+                            time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
                         continue
 
                     latency_ms = (time.time() - start_time) * 1000
                     status_code = 429 if "429" in err_msg else 500
                     log_analytics_entry(
                         "/api/chat", status_code, latency_ms, 0, 0, client_ip,
-                        user=user, model=MODEL_NAME, error=err_msg,
+                        user=user, model=state["model"], error=err_msg,
                     )
                     yield f"\n\n⚠️ Error: {err_msg}"
                     return
