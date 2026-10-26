@@ -352,6 +352,9 @@ class ChatRequest(BaseModel):
     code_execution: bool = False
     # Temporary chat: nothing is saved (no messages, no documents, no memory).
     temporary: bool = False
+    # Edit a sent message: number of messages to KEEP from the start of the chat.
+    # Everything after that point is deleted before the edited message is saved.
+    edit_keep: Optional[int] = None
 
 
 TEMP_HINT = (
@@ -735,6 +738,25 @@ def externalize_images(user: "AuthUser", payload: Optional[dict]) -> Optional[di
     if isinstance(payload.get("multi"), list):
         return {**payload, "multi": [one(f) for f in payload["multi"]]}
     return one(payload)
+
+
+def truncate_chat_messages(user: "AuthUser", chat_id: str, keep: int):
+    """Deletes every message of the chat after the first `keep` ones
+    (used when the user edits an earlier message)."""
+    try:
+        keep = max(0, int(keep))
+        rows = (
+            user.db.table("messages")
+            .select("id")
+            .eq("chat_id", chat_id)
+            .order("created_at", desc=False)
+            .execute()
+        ).data or []
+        ids = [r["id"] for r in rows[keep:] if r.get("id") is not None]
+        if ids:
+            user.db.table("messages").delete().in_("id", ids).execute()
+    except Exception as ex:
+        print("Could not truncate chat for edit:", ex)
 
 
 def _save_turn_with_files(user: "AuthUser", chat_id: str, message: str,
@@ -2094,6 +2116,16 @@ html.light #nova-toast { background: #fff; color: #111; }
 .msg-actions { display: flex; gap: 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid #2a2a2a; align-items: center; flex-wrap: wrap; }
 .action-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.85rem; padding: 2px 6px; border-radius: 4px; display: flex; align-items: center; gap: 4px; }
 .action-btn:hover { color: #fff; background: #2f2f2f; }
+.user-actions { border-top: none; margin-top: 2px; padding-top: 0; justify-content: flex-end; }
+.edit-area { display: flex; flex-direction: column; gap: 8px; min-width: min(420px, 70vw); }
+.edit-textarea { width: 100%; background: #1f1f1f; color: inherit; border: 1px solid #555; border-radius: 8px; padding: 8px 10px; font: inherit; line-height: 1.5; resize: vertical; outline: none; }
+.edit-textarea:focus { border-color: #888; }
+.edit-row { display: flex; gap: 8px; justify-content: flex-end; }
+.edit-save { background: #fff; color: #111; }
+.edit-save:hover { background: #e5e5e5; color: #111; }
+html.light .edit-textarea { background: #fff; border-color: #c8c8d0; }
+html.light .edit-save { background: #1f2328; color: #fff; }
+html.light .edit-save:hover { background: #333; color: #fff; }
 .msg-meta { font-size: 0.75rem; color: #666; margin-left: auto; }
 .katex { font-size: 1.08em; }
 .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 10px 0; }
@@ -4106,7 +4138,7 @@ currentHistory.forEach((msg) => {
 if (!msg) return;
 const role = msg.role || 'user';
 const content = msg.content || '';
-appendMessageUI(role, content, msg.file_payload || msg.file, msg.meta);
+appendMessageUI(role, content, msg.file_payload || msg.file, msg.meta, msg);
 });
 box.scrollTop = box.scrollHeight;
 }
@@ -4144,7 +4176,7 @@ function setImageSource(img, f) {
     .then(b => { img.src = URL.createObjectURL(b); })
     .catch(() => { img.alt = '(picture not available)'; });
 }
-function appendMessageUI(role, text, fileObj, metaObj) {
+function appendMessageUI(role, text, fileObj, metaObj, histObj) {
 const box = document.getElementById('chat-box');
 if (!box) return;
 const _w = box.querySelector('.welcome-msg');
@@ -4200,6 +4232,10 @@ contentDiv.innerText = text;
 msgDiv.appendChild(contentDiv);
 if (text && role === 'model') {
 addMessageActions(msgDiv, text, metaObj);
+}
+if (text && role === 'user') {
+msgDiv._hist = histObj || null;
+addUserMessageActions(msgDiv, text, !!fileObj);
 }
 box.appendChild(msgDiv);
 box.scrollTop = box.scrollHeight;
@@ -4968,8 +5004,93 @@ return currentHistory
 .filter(m => m && m.content && String(m.content).trim())
 .map(m => ({ role: m.role || 'user', content: String(m.content).replace(/!\[[^\]]*\]\(data:image\/[^)]*\)/g, '[chart image]') }));
 }
+let pendingEditKeep = null;
+function addUserMessageActions(msgDiv, text, hasFile) {
+const bar = document.createElement('div');
+bar.className = 'msg-actions user-actions';
+const copyBtn = document.createElement('button');
+copyBtn.className = 'action-btn';
+copyBtn.innerText = '📋 Copy';
+copyBtn.onclick = () => {
+try { navigator.clipboard.writeText(msgDiv._hist ? (msgDiv._hist.content || text) : text); } catch (e) {}
+copyBtn.innerText = '✅ Copied';
+setTimeout(() => copyBtn.innerText = '📋 Copy', 2000);
+};
+bar.appendChild(copyBtn);
+// Messages with attachments can't be edited (the files would be lost).
+if (!hasFile) {
+const editBtn = document.createElement('button');
+editBtn.className = 'action-btn';
+editBtn.innerText = '✏️ Edit';
+editBtn.title = 'Edit this message and get a new answer';
+editBtn.onclick = () => startEditMessage(msgDiv);
+bar.appendChild(editBtn);
+}
+msgDiv.appendChild(bar);
+}
+function startEditMessage(msgDiv) {
+if (isStreaming) { alert('Please wait for the answer to finish (or press Stop) before editing.'); return; }
+if (msgDiv.querySelector('.edit-area')) return;
+const hist = msgDiv._hist;
+const original = hist ? (hist.content || '') : (msgDiv.querySelector('.text-content') || {}).innerText || '';
+const contentDiv = msgDiv.querySelector('.text-content');
+const bar = msgDiv.querySelector('.user-actions');
+if (contentDiv) contentDiv.style.display = 'none';
+if (bar) bar.style.display = 'none';
+const wrap = document.createElement('div');
+wrap.className = 'edit-area';
+const ta = document.createElement('textarea');
+ta.className = 'edit-textarea';
+ta.value = original;
+ta.rows = Math.min(10, Math.max(2, original.split('\n').length));
+const row = document.createElement('div');
+row.className = 'edit-row';
+const cancel = document.createElement('button');
+cancel.className = 'action-btn';
+cancel.innerText = 'Cancel';
+const save = document.createElement('button');
+save.className = 'action-btn edit-save';
+save.innerText = 'Save & send';
+const close = () => {
+wrap.remove();
+if (contentDiv) contentDiv.style.display = '';
+if (bar) bar.style.display = '';
+};
+cancel.onclick = close;
+save.onclick = () => {
+const newText = ta.value.trim();
+if (!newText) return;
+if (newText === original.trim()) { close(); return; }
+submitEditedMessage(msgDiv, newText);
+};
+ta.addEventListener('keydown', (e) => {
+if (e.key === 'Escape') { e.preventDefault(); close(); }
+else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save.onclick(); }
+});
+row.appendChild(cancel);
+row.appendChild(save);
+wrap.appendChild(ta);
+wrap.appendChild(row);
+msgDiv.insertBefore(wrap, bar || null);
+ta.focus();
+ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+function submitEditedMessage(msgDiv, newText) {
+if (isStreaming) return;
+const idx = msgDiv._hist ? currentHistory.indexOf(msgDiv._hist) : -1;
+if (idx < 0) { alert('This message can no longer be edited. Please reload the chat.'); return; }
+// Drop this message and everything after it, then send the new version.
+currentHistory.length = idx;
+renderChatBox();
+const input = document.getElementById('user-input');
+if (input) input.value = newText;
+pendingEditKeep = tempChat ? null : idx;
+sendMessage();
+}
 async function sendMessage() {
 stopReadAloud();
+const editKeep = pendingEditKeep;
+pendingEditKeep = null;
 const input = document.getElementById('user-input');
 let text = input ? input.value.trim() : '';
 const multi = selectedFiles.slice();
@@ -4988,8 +5109,9 @@ const filePayload = selectedFile;
 const shownFile = multi.length
 ? { multi: multi.map(f => ({ name: f.name, type: f.type, size: f.size })) }
 : (imgs.length ? { multi: imgs.map(f => ({ name: f.name, type: f.type, size: f.size, data: f.data })) } : filePayload);
-currentHistory.push({ role: 'user', content: text, file_payload: shownFile });
-const userDiv = appendMessageUI('user', text, shownFile);
+const userHistObj = { role: 'user', content: text, file_payload: shownFile };
+currentHistory.push(userHistObj);
+const userDiv = appendMessageUI('user', text, shownFile, null, userHistObj);
 if (input) {
 input.value = '';
 input.style.height = 'auto';
@@ -5053,6 +5175,7 @@ signal: activeAbortController.signal,
 body: JSON.stringify({
 chat_id: currentChatId,
 temporary: tempChat,
+edit_keep: editKeep,
 history: buildHistoryForApi(),
 message: text,
 file: filePayload,
@@ -7375,6 +7498,10 @@ def chat_endpoint(
                     system_instruction += DOC_HINT + doc_ctx + "\n</documents>"
             except Exception as ex:
                 print("Document search failed:", ex)
+
+        # Edited message: remove the old message and everything after it first.
+        if chat_id and body.edit_keep is not None:
+            truncate_chat_messages(user, chat_id, body.edit_keep)
 
         # Save the user message in the background: Gemini starts immediately.
         save_future = None
