@@ -2116,6 +2116,9 @@ html.light #nova-toast { background: #fff; color: #111; }
 .msg-actions { display: flex; gap: 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid #2a2a2a; align-items: center; flex-wrap: wrap; }
 .action-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.85rem; padding: 2px 6px; border-radius: 4px; display: flex; align-items: center; gap: 4px; }
 .action-btn:hover { color: #fff; background: #2f2f2f; }
+.time-sep { align-self: center; font-size: 0.8rem; color: #8a8a8a; margin: 10px 0 2px; text-align: center; }
+.time-sep strong { font-weight: 600; }
+html.light .time-sep { color: #6b7280; }
 .user-actions { border-top: none; margin-top: 2px; padding-top: 0; justify-content: flex-end; }
 .edit-area { display: flex; flex-direction: column; gap: 8px; min-width: min(420px, 70vw); }
 .edit-textarea { width: 100%; background: #1f1f1f; color: inherit; border: 1px solid #555; border-radius: 8px; padding: 8px 10px; font: inherit; line-height: 1.5; resize: vertical; outline: none; }
@@ -4176,6 +4179,39 @@ function setImageSource(img, f) {
     .then(b => { img.src = URL.createObjectURL(b); })
     .catch(() => { img.alt = '(picture not available)'; });
 }
+// ===== Time separator ("Monday 20:01"): first message, then after 1 hour without talking =====
+const TIME_GAP_MS = 60 * 60 * 1000;
+function getMsgTime(m) {
+if (!m) return null;
+if (typeof m.ts === 'number') return m.ts;
+const t = Date.parse(m.created_at || '');
+return isNaN(t) ? null : t;
+}
+function formatSepTime(ts) {
+const d = new Date(ts);
+const hh = String(d.getHours()).padStart(2, '0');
+const mm = String(d.getMinutes()).padStart(2, '0');
+const ageDays = (Date.now() - ts) / 86400000;
+const day = ageDays < 6
+? d.toLocaleDateString('en-US', { weekday: 'long' })
+: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+return { day: day, time: hh + ':' + mm };
+}
+function buildTimeSeparator(histObj) {
+const ts = getMsgTime(histObj);
+if (ts === null) return null;
+const idx = Array.isArray(currentHistory) ? currentHistory.indexOf(histObj) : -1;
+if (idx > 0) {
+const prevTs = getMsgTime(currentHistory[idx - 1]);
+// Previous message time unknown, or less than 1 hour ago: no separator.
+if (prevTs === null || ts - prevTs < TIME_GAP_MS) return null;
+}
+const f = formatSepTime(ts);
+const sep = document.createElement('div');
+sep.className = 'time-sep';
+sep.innerHTML = '<strong>' + escapeHtml(f.day) + '</strong> ' + f.time;
+return sep;
+}
 function appendMessageUI(role, text, fileObj, metaObj, histObj) {
 const box = document.getElementById('chat-box');
 if (!box) return;
@@ -4236,6 +4272,10 @@ addMessageActions(msgDiv, text, metaObj);
 if (text && role === 'user') {
 msgDiv._hist = histObj || null;
 addUserMessageActions(msgDiv, text, !!fileObj);
+}
+if (role === 'user' && histObj) {
+const sep = buildTimeSeparator(histObj);
+if (sep) box.appendChild(sep);
 }
 box.appendChild(msgDiv);
 box.scrollTop = box.scrollHeight;
@@ -5109,7 +5149,7 @@ const filePayload = selectedFile;
 const shownFile = multi.length
 ? { multi: multi.map(f => ({ name: f.name, type: f.type, size: f.size })) }
 : (imgs.length ? { multi: imgs.map(f => ({ name: f.name, type: f.type, size: f.size, data: f.data })) } : filePayload);
-const userHistObj = { role: 'user', content: text, file_payload: shownFile };
+const userHistObj = { role: 'user', content: text, file_payload: shownFile, ts: Date.now() };
 currentHistory.push(userHistObj);
 const userDiv = appendMessageUI('user', text, shownFile, null, userHistObj);
 if (input) {
@@ -5204,7 +5244,7 @@ const box = document.getElementById('chat-box');
 box.scrollTop = box.scrollHeight;
 }
 if (fullText.trim()) {
-currentHistory.push({ role: 'model', content: fullText });
+currentHistory.push({ role: 'model', content: fullText, ts: Date.now() });
 addMessageActions(botMsgDiv, fullText);
 autoOpenCanvas(fullText);
 learnFromTurn(text, fullText);
@@ -5222,7 +5262,7 @@ if (err.name !== 'AbortError') {
 contentDiv.innerHTML = `<div class="error-box">Error: ${escapeHtml(err.message)}</div>`;
 currentHistory.pop();
 } else if (fullText.trim()) {
-currentHistory.push({ role: 'model', content: fullText });
+currentHistory.push({ role: 'model', content: fullText, ts: Date.now() });
 }
 } finally {
 stopWaitTimer();
