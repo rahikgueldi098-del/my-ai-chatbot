@@ -2119,9 +2119,19 @@ html.light #nova-toast { background: #fff; color: #111; }
 .time-sep { align-self: center; font-size: 0.8rem; color: #8a8a8a; margin: 10px 0 2px; text-align: center; }
 .time-sep strong { font-weight: 600; }
 html.light .time-sep { color: #6b7280; }
+.message.user { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.message.user.selectable { -webkit-user-select: text; user-select: text; }
+.msg-menu { position: fixed; z-index: 10000; min-width: 230px; background: #262626; color: #fff; border: 1px solid #3a3a3a; border-radius: 18px; padding: 6px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); font-size: 1rem; }
+.msg-menu-head { padding: 8px 14px 6px; color: #9a9a9a; font-size: 0.85rem; }
+.msg-menu-item { display: flex; align-items: center; gap: 14px; width: 100%; background: transparent; border: none; color: inherit; font: inherit; text-align: left; padding: 11px 14px; border-radius: 12px; cursor: pointer; }
+.msg-menu-item:hover, .msg-menu-item:active { background: #353535; }
+.mm-ic { width: 22px; text-align: center; }
+html.light .msg-menu { background: #fff; color: #1f2328; border-color: #e0e0e6; box-shadow: 0 10px 30px rgba(0,0,0,0.15); }
+html.light .msg-menu-head { color: #6b7280; }
+html.light .msg-menu-item:hover, html.light .msg-menu-item:active { background: #f0f0f4; }
 .user-actions { border-top: none; margin-top: 2px; padding-top: 0; justify-content: flex-end; }
 .edit-area { display: flex; flex-direction: column; gap: 8px; min-width: min(420px, 70vw); }
-.edit-textarea { width: 100%; background: #1f1f1f; color: inherit; border: 1px solid #555; border-radius: 8px; padding: 8px 10px; font: inherit; line-height: 1.5; resize: vertical; outline: none; }
+.edit-textarea { -webkit-user-select: text; user-select: text; width: 100%; background: #1f1f1f; color: inherit; border: 1px solid #555; border-radius: 8px; padding: 8px 10px; font: inherit; line-height: 1.5; resize: vertical; outline: none; }
 .edit-textarea:focus { border-color: #888; }
 .edit-row { display: flex; gap: 8px; justify-content: flex-end; }
 .edit-save { background: #fff; color: #111; }
@@ -5045,7 +5055,114 @@ return currentHistory
 .map(m => ({ role: m.role || 'user', content: String(m.content).replace(/!\[[^\]]*\]\(data:image\/[^)]*\)/g, '[chart image]') }));
 }
 let pendingEditKeep = null;
+// ===== Long-press / right-click menu on your own messages =====
+let msgMenuEl = null;
+let msgMenuOpenedAt = 0;
+function closeMsgMenu() {
+if (msgMenuEl) { msgMenuEl.remove(); msgMenuEl = null; }
+}
+function userMsgText(msgDiv) {
+if (msgDiv._hist && msgDiv._hist.content) return msgDiv._hist.content;
+const c = msgDiv.querySelector('.text-content');
+return c ? c.innerText : '';
+}
+function selectUserMsgText(msgDiv) {
+const c = msgDiv.querySelector('.text-content');
+if (!c) return;
+document.querySelectorAll('.message.user.selectable').forEach(m => m.classList.remove('selectable'));
+msgDiv.classList.add('selectable');
+try {
+const range = document.createRange();
+range.selectNodeContents(c);
+const sel = window.getSelection();
+sel.removeAllRanges();
+sel.addRange(range);
+} catch (e) {}
+}
+function openMsgMenu(msgDiv, x, y) {
+closeMsgMenu();
+const menu = document.createElement('div');
+menu.className = 'msg-menu';
+const ts = getMsgTime(msgDiv._hist);
+if (ts !== null) {
+const d = new Date(ts);
+const head = document.createElement('div');
+head.className = 'msg-menu-head';
+head.innerText = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) + ', ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+menu.appendChild(head);
+}
+const addItem = (icon, label, fn) => {
+const b = document.createElement('button');
+b.className = 'msg-menu-item';
+b.innerHTML = '<span class="mm-ic">' + icon + '</span><span>' + label + '</span>';
+b.onclick = (ev) => { ev.stopPropagation(); closeMsgMenu(); fn(); };
+menu.appendChild(b);
+};
+const text = userMsgText(msgDiv);
+addItem('📋', 'Copy', () => {
+try { navigator.clipboard.writeText(text); } catch (e) {}
+showNovaToast('✅ Copied');
+});
+if (!msgDiv._hasFile) addItem('✏️', 'Edit', () => startEditMessage(msgDiv));
+addItem('🔤', 'Select text', () => selectUserMsgText(msgDiv));
+addItem('📤', 'Share prompt', () => {
+if (navigator.share) {
+navigator.share({ text: text }).catch(() => {});
+} else {
+try { navigator.clipboard.writeText(text); } catch (e) {}
+showNovaToast('📋 Sharing is not supported here, the prompt was copied instead');
+}
+});
+document.body.appendChild(menu);
+const w = menu.offsetWidth, h = menu.offsetHeight;
+const vw = window.innerWidth, vh = window.innerHeight;
+menu.style.left = Math.max(8, Math.min(x, vw - w - 8)) + 'px';
+menu.style.top = Math.max(8, Math.min(y, vh - h - 8)) + 'px';
+msgMenuEl = menu;
+msgMenuOpenedAt = Date.now();
+}
+(function setupMsgMenu() {
+let timer = null, startX = 0, startY = 0, pressedDiv = null;
+const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+const findUserMsg = (t) => {
+if (!t || !t.closest) return null;
+if (t.closest('.edit-area, .msg-actions, .doc-badge, a, button')) return null;
+return t.closest('.message.user');
+};
+document.addEventListener('pointerdown', (e) => {
+if (msgMenuEl && !e.target.closest('.msg-menu')) closeMsgMenu();
+if (e.pointerType === 'mouse' && e.button !== 0) return;
+const div = findUserMsg(e.target);
+if (!div) return;
+pressedDiv = div;
+startX = e.clientX; startY = e.clientY;
+cancel();
+timer = setTimeout(() => {
+timer = null;
+if (pressedDiv) openMsgMenu(pressedDiv, startX, startY);
+}, 450);
+});
+document.addEventListener('pointermove', (e) => {
+if (timer && (Math.abs(e.clientX - startX) > 10 || Math.abs(e.clientY - startY) > 10)) cancel();
+});
+['pointerup', 'pointercancel', 'dragstart'].forEach(ev => document.addEventListener(ev, cancel));
+document.addEventListener('scroll', () => { cancel(); closeMsgMenu(); }, true);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMsgMenu(); });
+document.addEventListener('contextmenu', (e) => {
+const div = findUserMsg(e.target);
+if (!div) return;
+e.preventDefault();
+cancel();
+if (Date.now() - msgMenuOpenedAt > 700) openMsgMenu(div, e.clientX, e.clientY);
+});
+// Clicking elsewhere ends a "Select text" selection mode.
+document.addEventListener('click', (e) => {
+if (!e.target.closest || e.target.closest('.message.user.selectable')) return;
+document.querySelectorAll('.message.user.selectable').forEach(m => m.classList.remove('selectable'));
+});
+})();
 function addUserMessageActions(msgDiv, text, hasFile) {
+msgDiv._hasFile = !!hasFile;
 const bar = document.createElement('div');
 bar.className = 'msg-actions user-actions';
 const copyBtn = document.createElement('button');
