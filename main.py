@@ -2030,29 +2030,51 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 body { background-color: #212121; color: #ececec; display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
-#sidebar { width: 260px; background-color: #171717; border-right: 1px solid #333; display: flex; flex-direction: column; padding: 15px; gap: 12px; flex-shrink: 0; }
-#new-chat-btn { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 8px; padding: 10px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: 0.2s; }
-#new-chat-btn:hover { background: #383838; }
-#chat-search { width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px solid #333; background: #212121; color: #fff; font-size: 0.85rem; outline: none; }
-#history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-.history-item { padding: 10px 12px; border-radius: 6px; font-size: 0.88rem; color: #b4b4b4; cursor: pointer; transition: 0.2s; display: flex; justify-content: space-between; align-items: center; }
-.history-item:hover { background: #2f2f2f; color: #fff; }
-.history-item.active { background: #212121; color: #fff; font-weight: 500; }
+#sidebar { width: 260px; background-color: #171717; border-right: 1px solid #262626; display: flex; flex-direction: column; padding: 8px; gap: 2px; flex-shrink: 0; }
+body.sb-collapsed #sidebar { display: none; }
+.sb-top { display: flex; align-items: center; justify-content: space-between; padding: 6px 6px 10px 10px; }
+.sb-brand { font-size: 1.15rem; font-weight: 700; letter-spacing: 0.2px; color: #ececec; }
+.sb-icon-btn { width: 36px; height: 36px; border-radius: 10px; border: none; background: transparent; color: #b4b4b4; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.sb-icon-btn:hover { background: #262626; color: #fff; }
+.sb-icon-btn svg, .sb-row svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+.sb-nav { display: flex; flex-direction: column; gap: 2px; }
+.sb-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 9px 10px; border: none; border-radius: 10px; background: transparent; color: #ececec; font-size: 0.95rem; font-weight: 500; text-align: left; cursor: pointer; transition: background 0.15s; }
+.sb-row:hover { background: #262626; }
+.sb-row-primary { background: #232323; }
+.sb-row-primary:hover { background: #2c2c2c; }
+.sb-search { cursor: text; }
+.sb-search:hover { background: #262626; }
+#chat-search { flex: 1; min-width: 0; width: 100%; padding: 0; border: none; background: transparent; color: #ececec; font-size: 0.95rem; font-weight: 500; outline: none; }
+#chat-search::placeholder { color: #ececec; opacity: 1; }
+#chat-search:focus::placeholder { color: #8e8e8e; }
+.sb-label { padding: 18px 10px 6px; font-size: 0.8rem; font-weight: 500; color: #8e8e8e; }
+#history-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; scrollbar-width: thin; scrollbar-color: #3a3a3a transparent; }
+.history-item { padding: 9px 10px; border-radius: 10px; font-size: 0.95rem; color: #ececec; cursor: pointer; transition: background 0.15s; display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+.history-item:hover { background: #232323; }
+.history-item.active { background: #2a2a2a; }
 .history-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
-.item-action-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.85rem; padding: 2px 4px; border-radius: 4px; display: none; }
+.item-action-btn { background: transparent; border: none; color: #888; cursor: pointer; font-size: 0.8rem; padding: 3px 4px; border-radius: 6px; display: none; filter: grayscale(1); opacity: 0.8; }
 .history-item:hover .item-action-btn { display: inline-block; }
-.item-action-btn:hover { color: #fff; }
+.item-action-btn:hover { color: #fff; opacity: 1; background: #3a3a3a; }
 .history-item.active .item-action-btn { display: inline-block; }
-.rename-input { flex: 1; min-width: 0; background: #2f2f2f; color: #fff; border: 1px solid #38bdf8; border-radius: 4px; padding: 3px 6px; font-size: 0.88rem; outline: none; }
-.export-box { border-top: 1px solid #333; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-.export-title { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
-.export-buttons { display: flex; gap: 8px; }
-.export-btn { flex: 1; background: #2f2f2f; color: #ccc; border: 1px solid #424242; border-radius: 6px; padding: 6px; font-size: 0.8rem; cursor: pointer; text-align: center; }
-.export-btn:hover { background: #383838; color: #fff; }
+.rename-input { flex: 1; min-width: 0; background: #2f2f2f; color: #fff; border: 1px solid #38bdf8; border-radius: 6px; padding: 3px 6px; font-size: 0.9rem; outline: none; }
+.sb-footer { position: relative; padding-top: 8px; margin-top: 4px; border-top: 1px solid #262626; }
+.sb-profile { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: none; border-radius: 12px; background: transparent; color: #ececec; cursor: pointer; text-align: left; }
+.sb-profile:hover, .sb-profile.open { background: #262626; }
+.sb-avatar { width: 32px; height: 32px; border-radius: 50%; background: #3b82f6; color: #fff; font-weight: 700; font-size: 0.9rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.sb-profile-text { min-width: 0; flex: 1; font-size: 0.88rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#user-email { text-transform: none; }
+.user-menu { display: none; position: absolute; left: 0; right: 0; bottom: calc(100% - 4px); background: #262626; border: 1px solid #3a3a3a; border-radius: 16px; padding: 6px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); z-index: 5; }
+.user-menu.open { display: block; }
+.user-menu .sb-row:hover { background: #323232; }
+.um-sep { height: 1px; background: #3a3a3a; margin: 4px 6px; }
+.um-danger { color: #f87171; }
 #main-container { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
-header { padding: 12px 20px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; background: #171717; font-weight: 600; gap: 8px; }
+header { padding: 12px 20px; border-bottom: none; display: flex; justify-content: space-between; align-items: center; background: #212121; font-weight: 600; gap: 8px; }
 .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-#menu-btn { display: none; background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 6px; padding: 6px 10px; font-size: 1rem; cursor: pointer; }
+#menu-btn { display: none; background: transparent; color: #ececec; border: none; border-radius: 10px; padding: 6px 10px; font-size: 1.15rem; cursor: pointer; }
+#menu-btn:hover { background: #2f2f2f; }
+body.sb-collapsed #menu-btn { display: inline-block; }
 .header-controls { display: flex; gap: 10px; align-items: center; }
 #persona-select { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 6px; padding: 6px 12px; font-size: 0.88rem; outline: none; cursor: pointer; max-width: 180px; }
 .toggle-btn { background: #2f2f2f; color: #888; border: 1px solid #424242; border-radius: 6px; padding: 6px 10px; font-size: 0.85rem; cursor: pointer; transition: 0.2s; white-space: nowrap; }
@@ -2194,7 +2216,8 @@ html.light .edit-save:hover { background: #333; color: #fff; }
 .indexing-hint { color: #888; font-size: 0.85rem; }
 @media (max-width: 768px) {
 #menu-btn { display: inline-block; }
-#sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform 0.25s ease; }
+#sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 290px; max-width: 86vw; z-index: 30; transform: translateX(-100%); transition: transform 0.25s ease; padding-top: calc(8px + env(safe-area-inset-top, 0px)); padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+body.sb-collapsed #sidebar { display: flex; }
 #sidebar.open { transform: translateX(0); }
 #sidebar-backdrop.show { display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 20; }
 header { padding: 10px; flex-wrap: wrap; }
@@ -2213,7 +2236,6 @@ header { padding: 10px; flex-wrap: wrap; }
 #auth-msg.ok { color: #4ade80; }
 #auth-submit { background: #fff; color: #000; border: none; border-radius: 8px; padding: 12px; font-weight: 600; cursor: pointer; font-size: 1rem; }
 #auth-switch { color: #38bdf8; font-size: 0.85rem; text-align: center; cursor: pointer; text-decoration: none; }
-#user-email { text-transform: none; word-break: break-all; }
 
 #canvas-panel { display: none; width: 46%; min-width: 320px; max-width: 920px; flex-shrink: 0; background: #171717; border-left: 1px solid #333; flex-direction: column; height: 100vh; height: 100dvh; }
 #canvas-panel.open { display: flex; }
@@ -2287,25 +2309,36 @@ header { padding: 10px; flex-wrap: wrap; }
 html.light { color-scheme: light; }
 html.light body { background-color: #ffffff; color: #1f2328; }
 html.light #sidebar { background-color: #f4f4f6; border-right-color: #e3e3e8; }
-html.light header { background: #f4f4f6; border-bottom-color: #e3e3e8; }
-html.light #new-chat-btn, html.light .export-btn, html.light #menu-btn, html.light #persona-select,
+html.light header { background: #ffffff; border-bottom-color: #e3e3e8; }
+html.light .export-btn, html.light #persona-select,
 html.light .toggle-btn, html.light .icon-btn, html.light #user-input, html.light .auth-input,
 html.light .set-select, html.light .set-btn, html.light #canvas-select, html.light .canvas-btn,
 html.light #analytics-hours { background: #ececf0 !important; color: #1f2328; border-color: #d4d4da !important; }
 html.light .toggle-btn { color: #6b7280; }
 html.light .toggle-btn.active { background: #dcfce7 !important; color: #15803d; border-color: #22c55e !important; }
 html.light .icon-btn.recording { background: #fee2e2 !important; color: #dc2626; border-color: #ef4444 !important; }
-html.light #new-chat-btn:hover, html.light .export-btn:hover, html.light .icon-btn:hover,
+html.light .export-btn:hover, html.light .icon-btn:hover,
 html.light .set-btn:hover, html.light .canvas-btn:hover { background: #e0e0e6 !important; color: #111; }
 html.light .set-btn.danger { color: #dc2626; }
 html.light #send-btn, html.light #auth-submit { background: #1f2328; color: #fff; }
 html.light #send-btn.stop-btn { background: #ef4444; color: #fff; }
-html.light #chat-search, html.light .rename-input { background: #fff; color: #1f2328; border-color: #d4d4da; }
-html.light .history-item { color: #555; }
-html.light .history-item:hover { background: #e9e9ee; color: #111; }
-html.light .history-item.active { background: #fff; color: #111; }
+html.light .rename-input { background: #fff; color: #1f2328; border-color: #d4d4da; }
+html.light #sidebar { background-color: #f9f9fb; }
+html.light .sb-brand, html.light .sb-row, html.light #chat-search, html.light #chat-search::placeholder, html.light .history-item, html.light .sb-profile { color: #1f2328; }
+html.light .sb-icon-btn { color: #555; }
+html.light .sb-icon-btn:hover, html.light .sb-row:hover, html.light .sb-search:hover, html.light .sb-profile:hover, html.light .sb-profile.open { background: #ececf0; }
+html.light .sb-row-primary { background: #ececf0; }
+html.light .sb-row-primary:hover { background: #e2e2e8; }
+html.light .sb-label { color: #6b7280; }
+html.light .history-item:hover { background: #ececf0; }
+html.light .history-item.active { background: #e4e4ea; }
+html.light .sb-footer { border-top-color: #e3e3e8; }
+html.light .user-menu { background: #fff; border-color: #e0e0e6; box-shadow: 0 10px 30px rgba(0,0,0,0.15); }
+html.light .user-menu .sb-row:hover { background: #f0f0f4; }
+html.light .um-sep { background: #e3e3e8; }
+html.light .um-danger { color: #dc2626; }
+html.light #menu-btn:hover { background: #ececf0; }
 html.light .item-action-btn:hover, html.light .close-btn:hover { color: #111; }
-html.light .export-box { border-top-color: #e3e3e8; }
 html.light .user { background: #ececf0; color: #1f2328; }
 html.light .model { background: #fff; color: #1f2328; border-color: #e3e3e8; }
 html.light .message :not(pre) > code { background: #eceef2; color: #1f2328; }
@@ -2411,43 +2444,44 @@ html.light .welcome-chips .chip { background: #f0f0f4; border-color: #dcdce2; co
 html.light #input-container { background: #f4f4f7; border-color: #dcdce2; }
 /* ===== Temporary chat ===== */
 #temp-btn { display: none; }
-#temp-chat-btn { background: transparent; color: #c4b5fd; border: 1px dashed #4c3a8a; border-radius: 8px; padding: 9px; font-weight: 600; cursor: pointer; transition: 0.2s; }
-#temp-chat-btn:hover, body.temp-mode #temp-chat-btn { background: #251d3f; }
+body.temp-mode #temp-chat-btn { background: #251d3f; color: #c4b5fd; }
 .toggle-btn.temp-on { background: #251d3f; color: #c4b5fd; border-color: #6d4fd8; }
 #temp-banner { display: none; align-self: center; width: calc(100% - 24px); max-width: 776px; margin: 8px 12px 0; padding: 8px 14px; font-size: 0.82rem; line-height: 1.4; text-align: center; color: #c4b5fd; background: #251d3f; border: 1px solid #4c3a8a; border-radius: 10px; }
 body.temp-mode #temp-banner { display: block; }
 @media (max-width: 768px) { #temp-btn { display: inline-block; } }
-html.light #temp-chat-btn { color: #6d28d9; border-color: #a78bfa; }
-html.light #temp-chat-btn:hover, html.light body.temp-mode #temp-chat-btn { background: #ede9fe; }
+html.light body.temp-mode #temp-chat-btn { background: #ede9fe; color: #6d28d9; }
 html.light .toggle-btn.temp-on { background: #ede9fe; color: #6d28d9; border-color: #a78bfa; }
 html.light #temp-banner { background: #ede9fe; color: #5b21b6; border-color: #c4b5fd; }
 /* ===== PWA install ===== */
-#install-btn { background: #2f2f2f; color: #fff; border: 1px solid #424242; border-radius: 8px; padding: 9px; font-weight: 600; cursor: pointer; transition: 0.2s; }
-#install-btn:hover { background: #383838; }
-html.light #install-btn { background: #f0f0f4; color: #111; border-color: #dcdce2; }
 @media (display-mode: standalone) { html, body { overscroll-behavior: none; } }
 </style>
 </head>
 <body>
 <div id="sidebar-backdrop" onclick="toggleSidebar()"></div>
 <div id="sidebar">
-<button id="new-chat-btn" onclick="startNewChat()">+ New Chat</button>
-<button id="temp-chat-btn" onclick="toggleTempChat()" title="A chat that is not saved in your history">👻 Temporary chat</button>
-<button id="install-btn" style="display:none;" onclick="installApp()" title="Add this app to your home screen">📲 Install app</button>
-<input type="text" id="chat-search" name="q-chat-filter-x" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" data-lpignore="true" data-1p-ignore data-form-type="other" placeholder="Search chats..." oninput="onChatSearchInput(event)">
+<div class="sb-top">
+<span class="sb-brand">NOVA AI</span>
+<button class="sb-icon-btn" onclick="toggleSidebar()" title="Close sidebar" aria-label="Close sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><path d="M9.5 4.5v15"/></svg></button>
+</div>
+<div class="sb-nav">
+<button id="new-chat-btn" class="sb-row sb-row-primary" onclick="startNewChat()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5H8.5A4 4 0 0 0 4.5 8.5v7a4 4 0 0 0 4 4h7a4 4 0 0 0 4-4V12"/><path d="M16.5 4l3.5 3.5L11.5 16H8v-3.5z"/></svg><span class="nav-label">New chat</span></button>
+<label class="sb-row sb-search" for="chat-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><input type="text" id="chat-search" name="q-chat-filter-x" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" data-lpignore="true" data-1p-ignore data-form-type="other" placeholder="Search chats" oninput="onChatSearchInput(event)"></label>
+<button id="temp-chat-btn" class="sb-row" onclick="toggleTempChat()" title="A chat that is not saved in your history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 20v-9a6 6 0 0 1 12 0v9l-2.5-2-2 2-1.5-2-1.5 2-2-2z"/><circle cx="10" cy="11" r=".6" fill="currentColor"/><circle cx="14" cy="11" r=".6" fill="currentColor"/></svg><span class="nav-label">Temporary chat</span></button>
+<button id="install-btn" class="sb-row" style="display:none;" onclick="installApp()" title="Add this app to your home screen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M5 19.5h14"/></svg><span class="nav-label">Install app</span></button>
+</div>
+<div class="sb-label">Recents</div>
 <div id="history-list"></div>
-<div class="export-box">
-<span class="export-title" id="user-email"></span>
-<button class="export-btn" onclick="logout()">Log out</button>
-<button class="export-btn" onclick="openHelpModal()">❓ Help &amp; About</button>
-<button class="export-btn" onclick="openDataModal()">🧹 Manage my data</button>
+<div class="sb-footer">
+<div id="user-menu" class="user-menu">
+<button class="sb-row" onclick="openHelpModal()"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M9.8 9.6a2.3 2.3 0 1 1 3.2 2.1c-.7.3-1 .9-1 1.6"/><circle cx="12" cy="16.6" r=".6" fill="currentColor"/></svg><span>Help &amp; About</span></button>
+<button class="sb-row" onclick="openDataModal()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14"/><path d="M9 7V5h6v2"/><path d="M7 7l1 12h8l1-12"/></svg><span>Manage my data</span></button>
+<div class="um-sep"></div>
+<button class="sb-row" onclick="exportChat('md')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4"/><path d="M7.5 8.5L12 4l4.5 4.5"/><path d="M5 14v4.5h14V14"/></svg><span>Export chat (Markdown)</span></button>
+<button class="sb-row" onclick="exportChat('json')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4"/><path d="M7.5 8.5L12 4l4.5 4.5"/><path d="M5 14v4.5h14V14"/></svg><span>Export chat (JSON)</span></button>
+<div class="um-sep"></div>
+<button class="sb-row um-danger" onclick="logout()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19H10"/><path d="M15 8l4 4-4 4"/><path d="M19 12H9.5"/></svg><span>Log out</span></button>
 </div>
-<div class="export-box">
-<span class="export-title">Export Chat</span>
-<div class="export-buttons">
-<button class="export-btn" onclick="exportChat('md')">Markdown</button>
-<button class="export-btn" onclick="exportChat('json')">JSON</button>
-</div>
+<button class="sb-profile" id="user-profile-btn" onclick="toggleUserMenu(event)" title="Account menu"><span class="sb-avatar" id="user-avatar">?</span><span class="sb-profile-text"><span id="user-email"></span></span></button>
 </div>
 </div>
 <div id="main-container">
@@ -2961,7 +2995,10 @@ function saveSession(d) {
 }
 function updateUserBox() {
   const el = document.getElementById('user-email');
-  if (el) el.textContent = authGet('supabase_email');
+  const em = authGet('supabase_email') || '';
+  if (el) el.textContent = em;
+  const av = document.getElementById('user-avatar');
+  if (av) av.textContent = (em.trim().charAt(0) || '?').toUpperCase();
 }
 function showAuth(msg) {
   const m = document.getElementById('auth-modal');
@@ -3928,9 +3965,35 @@ if (!text) return '';
 return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 function toggleSidebar() {
+if (window.innerWidth > 768) {
+// Desktop: fold the sidebar away (and remember the choice)
+const c = document.body.classList.toggle('sb-collapsed');
+try { localStorage.setItem('nova_sb_collapsed', c ? '1' : '0'); } catch (e) {}
+return;
+}
 document.getElementById('sidebar').classList.toggle('open');
 document.getElementById('sidebar-backdrop').classList.toggle('show');
 }
+try { if (localStorage.getItem('nova_sb_collapsed') === '1') document.body.classList.add('sb-collapsed'); } catch (e) {}
+function toggleUserMenu(ev) {
+if (ev) ev.stopPropagation();
+const m = document.getElementById('user-menu');
+const b = document.getElementById('user-profile-btn');
+if (!m) return;
+const open = m.classList.toggle('open');
+if (b) b.classList.toggle('open', open);
+}
+function closeUserMenu() {
+const m = document.getElementById('user-menu');
+const b = document.getElementById('user-profile-btn');
+if (m) m.classList.remove('open');
+if (b) b.classList.remove('open');
+}
+document.addEventListener('click', (e) => {
+if (e.target.closest && !e.target.closest('#user-menu') && !e.target.closest('#user-profile-btn')) closeUserMenu();
+else if (e.target.closest && e.target.closest('#user-menu .sb-row')) closeUserMenu();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeUserMenu(); });
 function closeSidebarOnMobile() {
 document.getElementById('sidebar').classList.remove('open');
 document.getElementById('sidebar-backdrop').classList.remove('show');
@@ -3970,7 +4033,7 @@ function updateTempUI() {
   const hb = document.getElementById('temp-btn');
   if (hb) { hb.className = tempChat ? 'toggle-btn temp-on' : 'toggle-btn'; hb.textContent = tempChat ? '👻 Temporary: ON' : '👻 Temporary'; }
   const sb = document.getElementById('temp-chat-btn');
-  if (sb) sb.textContent = tempChat ? '↩ Back to normal chat' : '👻 Temporary chat';
+  if (sb) { const lb = sb.querySelector('.nav-label'); if (lb) lb.textContent = tempChat ? 'Back to normal chat' : 'Temporary chat'; }
 }
 async function leaveTempChat() {
   if (!tempChat) return true;
