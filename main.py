@@ -2501,7 +2501,7 @@ html.light #install-btn { background: #f0f0f4; color: #111; border-color: #dcdce
 <button id="send-btn" onclick="handleSendOrStop()">Send</button>
 </div>
 <div id="quota-note" class="quota-note"></div>
-<div class="legal-note">AI can make mistakes, so double-check important information. <a href="#" onclick="openHelpModal(); return false;">Help</a> &middot; <a href="/privacy" target="_blank">Privacy</a> &middot; <a href="/terms" target="_blank">Terms</a></div>
+<div class="legal-note">NOVA AI can make mistakes, so double-check important information. <a href="#" onclick="openHelpModal(); return false;">Help</a> &middot; <a href="/privacy" target="_blank">Privacy</a> &middot; <a href="/terms" target="_blank">Terms</a></div>
 </div>
 </div>
 <div id="canvas-panel">
@@ -4041,7 +4041,12 @@ refreshDocs();
 async function deleteChat(id, event) {
 if (event) event.stopPropagation();
 try {
-await fetch(`/api/chats/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
+const delRes = await fetch(`/api/chats/${id}`, { method: 'DELETE', headers: getAuthHeaders() });
+if (!delRes.ok) {
+showNovaToast('⚠️ Could not delete the conversation');
+return;
+}
+showNovaToast('🗑️ Conversation deleted');
 chats = chats.filter(c => c.id !== id);
 if (chats.length === 0) {
 await startNewChat();
