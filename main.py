@@ -34,7 +34,7 @@ MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "0"))
 # Only the last N messages of the history are sent to Gemini (faster + cheaper).
 MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "12"))
-MAX_RETRIES = 2
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "4"))
 # Limits (change them in Vercel -> Environment Variables, no code change needed)
 USER_RATE_LIMIT_PER_MIN = int(os.environ.get("USER_RATE_LIMIT_PER_MIN", "20"))
 DAILY_REQUEST_LIMIT = int(os.environ.get("DAILY_REQUEST_LIMIT", "200"))  # 0 = unlimited
@@ -7911,6 +7911,7 @@ def chat_endpoint(
             use_fallback = bool(FALLBACK_MODEL) and SDK_MODE == "NEW" and FALLBACK_MODEL != MODEL_NAME
             base_attempts = MAX_RETRIES + (1 if use_fallback else 0)
             extra = 0  # +1 for each "simplify the request" retry after a 400 error
+            base_contents = list(contents) if SDK_MODE == "NEW" else None  # to resume a cut answer
             attempt = -1
             while True:
                 attempt += 1
@@ -7973,11 +7974,17 @@ def chat_endpoint(
                     # Overloaded (503), rate limited (429) or too slow: retry only if nothing
                     # was sent yet (no duplicated text).
                     too_slow = isinstance(ex, FirstTokenTimeout)
-                    if (
-                        (too_slow or "429" in err_msg or "503" in err_msg)
-                        and not total_output_text
-                        and not last_attempt
-                    ):
+                    transient = too_slow or "429" in err_msg or "503" in err_msg
+                    can_resume = (not total_output_text) or (base_contents is not None)
+                    if transient and can_resume and not last_attempt:
+                        if total_output_text:
+                            # The answer was cut mid-way: ask the model to continue where it stopped.
+                            contents[:] = base_contents + [
+                                types.Content(role="model", parts=[types.Part.from_text(text=total_output_text)]),
+                                types.Content(role="user", parts=[types.Part.from_text(
+                                    text="Continue your previous answer exactly from where it stopped. "
+                                         "Do not repeat anything and do not add any introduction.")]),
+                            ]
                         if use_fallback and state["model"] != FALLBACK_MODEL:
                             print(f"[fallback] {state['model']} -> {FALLBACK_MODEL}: {err_msg[:120]}")
                             state["model"] = FALLBACK_MODEL
@@ -7992,7 +7999,10 @@ def chat_endpoint(
                         "/api/chat", status_code, latency_ms, 0, 0, client_ip,
                         user=user, model=state["model"], error=err_msg,
                     )
-                    yield f"\n\n⚠️ Error: {err_msg}\n\n(model: {state['model']})"
+                    if "503" in err_msg or "429" in err_msg:
+                        yield "\n\n⚠️ The AI is very busy right now. Please press Send again in a few seconds."
+                    else:
+                        yield f"\n\n⚠️ Error: {err_msg}\n\n(model: {state['model']})"
                     return
 
         return StreamingResponse(
