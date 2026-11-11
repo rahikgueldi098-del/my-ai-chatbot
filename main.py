@@ -5312,6 +5312,69 @@ if (input) input.value = newText;
 pendingEditKeep = tempChat ? null : idx;
 sendMessage();
 }
+// ---- Connection-drop recovery (phone switched to another app while waiting) ----
+let streamReader = null;
+let lastChunkAt = 0;
+let hiddenSince = 0;
+let dropForRecovery = false;
+document.addEventListener('visibilitychange', () => {
+if (document.hidden) { hiddenSince = Date.now(); return; }
+const wasHiddenMs = hiddenSince ? Date.now() - hiddenSince : 0;
+hiddenSince = 0;
+// The phone may have frozen the connection: if nothing arrives after coming
+// back, cancel the dead stream so the page switches to "recovery" mode.
+if (isStreaming && streamReader && wasHiddenMs > 3000) {
+setTimeout(() => {
+if (isStreaming && streamReader && Date.now() - lastChunkAt > 5000) {
+dropForRecovery = true;
+try { streamReader.cancel(); } catch (e) {}
+}
+}, 4000);
+}
+});
+function isConnectionDrop(err) {
+if (!err || err.name === 'AbortError') return false;
+const m = String(err.message || '').toLowerCase();
+return err instanceof TypeError || /network|load failed|failed to fetch|connection|terminated|interrupted|dropped/.test(m);
+}
+// The server keeps working and saves the answer even if the phone left.
+// So we simply ask the server for it until it is there.
+async function recoverAnswerFromServer(chatId, userText, contentDiv, partialText, signal) {
+const started = Date.now();
+let polls = 0;
+const hint = (extra) => {
+const base = partialText ? safeParseMarkdown(partialText) : '';
+contentDiv.innerHTML = base + `<div class="indexing-hint">⏳ ${extra}</div>`;
+};
+hint('Connection was interrupted. Getting your answer…');
+while (Date.now() - started < 180000) {
+if (signal && signal.aborted) return { status: 'aborted' };
+await new Promise(r => setTimeout(r, polls === 0 ? 1200 : 2500));
+polls++;
+try {
+const r = await fetch(`/api/chats/${chatId}/messages`, { headers: getAuthHeaders(), signal });
+if (r.ok) {
+const list = await r.json();
+let ui = -1;
+for (let i = list.length - 1; i >= 0; i--) {
+if (list[i].role === 'user' && (list[i].content || '').trim() === userText.trim()) { ui = i; break; }
+}
+if (ui === -1) {
+// The message never reached the server (phone left at the very moment of sending).
+if (polls >= 4) return { status: 'not_sent' };
+} else if (list[ui + 1] && list[ui + 1].role === 'model' && (list[ui + 1].content || '').trim()) {
+return { status: 'ok', text: list[ui + 1].content };
+} else {
+hint('The AI is still writing your answer…');
+}
+}
+} catch (e) {
+if (e.name === 'AbortError') return { status: 'aborted' };
+hint('Waiting for the connection…');
+}
+}
+return { status: 'timeout' };
+}
 async function sendMessage() {
 stopReadAloud();
 const editKeep = pendingEditKeep;
@@ -5418,16 +5481,22 @@ currentHistory.pop();
 return;
 }
 const reader = res.body.getReader();
+streamReader = reader;
+lastChunkAt = Date.now();
+dropForRecovery = false;
 const decoder = new TextDecoder();
 while (true) {
 const { done, value } = await reader.read();
 if (done) break;
+lastChunkAt = Date.now();
 stopWaitTimer();
 fullText += decoder.decode(value, { stream: true });
 contentDiv.innerHTML = safeParseMarkdown(fullText);
 const box = document.getElementById('chat-box');
 box.scrollTop = box.scrollHeight;
 }
+streamReader = null;
+if (dropForRecovery) { dropForRecovery = false; throw new Error('Connection dropped'); }
 if (fullText.trim()) {
 currentHistory.push({ role: 'model', content: fullText, ts: Date.now() });
 addMessageActions(botMsgDiv, fullText);
@@ -5443,7 +5512,33 @@ contentDiv.innerHTML = '<div class="error-box">Empty response from model.</div>'
 currentHistory.pop();
 }
 } catch (err) {
-if (err.name !== 'AbortError') {
+streamReader = null;
+if (err.name !== 'AbortError' && !tempChat && currentChatId && text && isConnectionDrop(err)) {
+// Not a real error: the phone just left the app. Fetch the saved answer.
+stopWaitTimer();
+activeAbortController = new AbortController();
+const rec = await recoverAnswerFromServer(currentChatId, text, contentDiv, fullText, activeAbortController.signal);
+if (rec.status === 'ok') {
+contentDiv.innerHTML = safeParseMarkdown(rec.text);
+currentHistory.push({ role: 'model', content: rec.text, ts: Date.now() });
+addMessageActions(botMsgDiv, rec.text);
+autoOpenCanvas(rec.text);
+const activeChat = chats.find(c => c.id === currentChatId);
+if (activeChat && (activeChat.title === 'New Discussion' || !activeChat.title)) {
+activeChat.title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
+renderSidebar();
+}
+const bx = document.getElementById('chat-box');
+if (bx) bx.scrollTop = bx.scrollHeight;
+} else if (rec.status === 'aborted') {
+if (fullText.trim()) currentHistory.push({ role: 'model', content: fullText, ts: Date.now() });
+} else if (rec.status === 'not_sent') {
+contentDiv.innerHTML = '<div class="error-box">Your message did not go through because the connection was lost. Please press Send again.</div>';
+currentHistory.pop();
+} else {
+contentDiv.innerHTML = '<div class="error-box">The answer is taking longer than expected. Reopen this chat in a moment: it will appear there once it is ready.</div>';
+}
+} else if (err.name !== 'AbortError') {
 contentDiv.innerHTML = `<div class="error-box">Error: ${escapeHtml(err.message)}</div>`;
 currentHistory.pop();
 } else if (fullText.trim()) {
@@ -5451,6 +5546,7 @@ currentHistory.push({ role: 'model', content: fullText, ts: Date.now() });
 }
 } finally {
 stopWaitTimer();
+streamReader = null;
 isStreaming = false;
 activeAbortController = null;
 updateSendBtnUI(false);
@@ -7906,7 +8002,7 @@ def chat_endpoint(
                     if chunk.text:
                         yield chunk.text
 
-        def generate():
+        def _generate_inner():
             total_output_text = ""
             use_fallback = bool(FALLBACK_MODEL) and SDK_MODE == "NEW" and FALLBACK_MODEL != MODEL_NAME
             base_attempts = MAX_RETRIES + (1 if use_fallback else 0)
@@ -8004,6 +8100,41 @@ def chat_endpoint(
                     else:
                         yield f"\n\n⚠️ Error: {err_msg}\n\n(model: {state['model']})"
                     return
+
+        def generate():
+            """Run the answer in a background thread and stream it from a queue.
+
+            If the phone goes to the background (or the connection drops) the
+            browser disconnects, but the worker thread keeps going and still
+            saves the full answer in the database. When the user comes back,
+            the page just loads the saved answer instead of showing an error.
+            """
+            q: "queue.Queue" = queue.Queue()
+            finished = threading.Event()
+            END = object()
+
+            def worker():
+                try:
+                    for piece in _generate_inner():
+                        q.put(piece)
+                except BaseException as ex:  # never lose the thread silently
+                    print("generation worker error:", ex)
+                finally:
+                    finished.set()
+                    q.put(END)
+
+            threading.Thread(target=worker, daemon=False).start()
+            try:
+                while True:
+                    item = q.get()
+                    if item is END:
+                        return
+                    yield item
+            finally:
+                # Client left early: keep this request alive until the answer is
+                # saved (important on Vercel, which could freeze the function).
+                if not finished.is_set():
+                    finished.wait(timeout=float(os.environ.get("DISCONNECT_GRACE_SEC", "240")))
 
         return StreamingResponse(
             generate(), media_type="text/event-stream", headers=headers
