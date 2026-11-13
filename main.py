@@ -6327,7 +6327,7 @@ def serve_gui():
 
 
 # --- Legal pages (Google login asks for a privacy policy and terms link) ---
-LEGAL_CONTACT = os.environ.get("LEGAL_CONTACT_EMAIL", "rahikgueldi098@gmail.com")
+LEGAL_CONTACT = os.environ.get("LEGAL_CONTACT_EMAIL", "contact@example.com")
 APP_DISPLAY_NAME = os.environ.get("APP_NAME", "NOVA AI")
 
 
