@@ -32,6 +32,24 @@ except ImportError:
 MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 # 0 = no "thinking" (fastest). Raise it (e.g. 1024) if you want deeper answers.
 THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "0"))
+# Smart routing: easy messages use THINKING_BUDGET (fast), hard ones (code, math, long text,
+# documents) use this bigger budget for better answers. Set to 0 to turn the routing off.
+THINKING_BUDGET_HARD = int(os.environ.get("GEMINI_THINKING_BUDGET_HARD", "1024"))
+_HARD_RE = re.compile(
+    r"```|\b(debug|bug|error|traceback|algorithm|optimi[sz]e|proof|prove|derive|integral|equation|"
+    r"sql|python|javascript|regex|step[- ]by[- ]step|analy[sz]e|compare|why|explain|"
+    r"calcul|expliqu|pourquoi|analyse|compar|d[ée]montr|"
+    r"احسب|اشرح|لماذا|قارن|حلل)\b",
+    re.IGNORECASE,
+)
+def pick_thinking_budget(message: str, has_documents: bool = False) -> int:
+    """Hard question -> think more. Simple chat -> answer fast."""
+    if THINKING_BUDGET_HARD <= THINKING_BUDGET:
+        return THINKING_BUDGET
+    text = message or ""
+    if has_documents or len(text) > 600 or _HARD_RE.search(text):
+        return THINKING_BUDGET_HARD
+    return THINKING_BUDGET
 # Only the last N messages of the history are sent to Gemini (faster + cheaper).
 MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "12"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "4"))
@@ -388,9 +406,15 @@ analytics_store = {
 
 
 def get_client_ip(request: Request) -> str:
+    # SECURITY: on Vercel these headers are set by Vercel itself, so the client cannot fake them.
+    # (The first value of x-forwarded-for CAN be faked by the user, so it is only a last resort.)
+    for header in ("x-vercel-forwarded-for", "x-real-ip"):
+        value = request.headers.get(header)
+        if value:
+            return value.split(",")[0].strip()
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+        return forwarded_for.split(",")[-1].strip()
     return request.client.host if request.client else "127.0.0.1"
 
 
@@ -2023,6 +2047,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 <link rel="icon" type="image/png" href="/icons/icon-192.png?v=2">
 <script>(function(){try{var s=JSON.parse(localStorage.getItem('nova_settings')||'{}');var t=s.theme||'dark';var light=t==='light'||(t==='system'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches);if(light)document.documentElement.classList.add('light');var m={small:'14px',medium:'16px',large:'18px'};if(m[s.fontSize])document.documentElement.style.fontSize=m[s.fontSize];}catch(e){}})();</script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
@@ -3943,6 +3968,13 @@ if (window.marked && typeof window.marked.parse === 'function') {
 try { html = window.marked.parse(str); } catch (e) {}
 }
 if (html === undefined) html = escapeHtml(str).replace(/\n/g, '<br>');
+// SECURITY: clean the markdown HTML (removes <script>, onerror=..., javascript: links)
+// BEFORE the trusted KaTeX output is put back in.
+if (window.DOMPurify) {
+html = window.DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+} else {
+html = escapeHtml(str).replace(/\n/g, '<br>');
+}
 return html.replace(/@@KX(\d+)X@@/g, (m, i) => maths[+i]);
 }
 // Live "still working" counter while the first word has not arrived yet.
@@ -4502,7 +4534,7 @@ function mermaidRunner(CODE) {
       window.mermaid.initialize({
         startOnLoad: false,
         suppressErrorRendering: true,
-        securityLevel: 'loose',
+        securityLevel: 'strict',
         theme: 'default',
         flowchart: { curve: a.curve, htmlLabels: a.hl, useMaxWidth: false }
       });
@@ -6972,8 +7004,9 @@ def get_document_file(doc_id: str, user: AuthUser = Depends(require_user)):
 
 
 def is_admin(user: AuthUser) -> bool:
-    # If ADMIN_EMAILS is not set, every logged-in user counts as admin.
-    return not ADMIN_EMAILS or (user.email or "").lower() in ADMIN_EMAILS
+    # SECURITY: if ADMIN_EMAILS is not set, NOBODY is admin (before, everybody was).
+    # Set ADMIN_EMAILS=your@email.com in Vercel -> Environment Variables.
+    return bool(ADMIN_EMAILS) and (user.email or "").lower() in ADMIN_EMAILS
 
 
 @app.get("/api/me")
@@ -7639,9 +7672,11 @@ def build_config(system_instruction: str, tools, use_thinking: bool):
     if tools:
         kwargs["tools"] = tools
     if use_thinking:
+        # use_thinking is True/False, or a 1-item tuple (budget,) chosen by pick_thinking_budget().
+        budget = use_thinking[0] if isinstance(use_thinking, tuple) else THINKING_BUDGET
         try:
             kwargs["thinking_config"] = types.ThinkingConfig(
-                thinking_budget=THINKING_BUDGET
+                thinking_budget=budget
             )
         except Exception:
             pass
@@ -7844,7 +7879,10 @@ def chat_endpoint(
         }
 
         # `state` lets the retry loop switch thinking off if the model rejects it.
-        state = {"use_thinking": True, "model": MODEL_NAME, "timeout": None, "plain": False}
+        state = {
+            "use_thinking": (pick_thinking_budget(message, DOC_HINT in system_instruction),),
+            "model": MODEL_NAME, "timeout": None, "plain": False,
+        }
         usage: Dict[str, int] = {}
 
         if SDK_MODE == "NEW":
