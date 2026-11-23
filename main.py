@@ -3935,11 +3935,16 @@ chats = [];
 } catch (e) {
 chats = [];
 }
-if (!Array.isArray(chats) || chats.length === 0) {
-await startNewChat();
-} else {
-await loadChat(chats[0].id);
-}
+if (!Array.isArray(chats)) chats = [];
+// Open on a blank welcome page (like ChatGPT / Claude). Old chats stay in the sidebar.
+// The new chat is only created in the database when the first message is sent,
+// so logging in does not fill your history with empty "New Discussion" rows.
+currentChatId = null;
+currentHistory = [];
+currentDocs = [];
+updateDocsButton();
+renderSidebar();
+renderChatBox();
 }
 function renderMathSafe(tex, display) {
 if (window.katex) {
